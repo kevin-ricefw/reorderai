@@ -131,7 +131,8 @@ def load_local_pos_daily_sales(
         )
 
     frames: list[pd.DataFrame] = []
-    for path in sorted(root.rglob("Product Sales*.csv")):
+    # Flat folder only — skip nested extract dirs like _unzipped/
+    for path in sorted(root.glob("Product Sales*.csv")):
         if path.name.lower().startswith("sales_from_paul"):
             continue
         sale_date = parse_sale_date_from_filename(path, default_year=default_year)

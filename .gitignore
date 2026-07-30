@@ -22,3 +22,4 @@ Thumbs.db
 # Local data dumps — never commit (sales, inventory, vendors, invoices, gift cards)
 data/**
 !data/**/.gitkeep
+!data/README.md

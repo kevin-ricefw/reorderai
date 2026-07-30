@@ -368,7 +368,7 @@ JOIN "{tenant}".orders o ON o.id = oi.order_id
 WHERE o.deleted_at IS NULL
   AND oi.deleted_at IS NULL
   AND COALESCE(o.is_return, false) = false
-  -- AND o.status IN (...)  -- confirm production statuses with TL
+  -- AND o.status IN (...)  -- confirm production statuses
 GROUP BY 1, 2;
 
 -- On-hand
@@ -446,7 +446,7 @@ Domain → tenants/domains (public)
 
 ## 9. Next steps (no ML yet)
 
-1. Confirm with TL: **schema-per-tenant** is intentional (vs separate DBs).  
+1. Confirm: **schema-per-tenant** is intentional (vs separate DBs).  
 2. Confirm which order statuses count as sold demand.  
 3. Confirm system-of-record for POS: `orders` vs `pos_register_orders`.  
 4. Backfill / integrate: stock (`product_locations`), vendor lead times (`product_vendor`), receives (`warehouse_checkins`).  
