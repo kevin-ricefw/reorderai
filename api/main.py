@@ -1,11 +1,7 @@
 """
-Inventory AI API — uploads, train jobs, and store UI.
+Reorder AI API — endpoints for TL UI integration.
 
-Local:
   uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
-
-Cloud Run:
-  uvicorn api.main:app --host 0.0.0.0 --port $PORT
 """
 
 from __future__ import annotations
@@ -17,8 +13,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -26,16 +20,15 @@ if str(ROOT) not in sys.path:
 
 load_dotenv(ROOT / ".env", override=True)
 
-from api.routes import detect_order, explain, system, train, uploads, vendor_order  # noqa: E402
-
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+from api.routes import detect_order, system  # noqa: E402
 
 app = FastAPI(
-    title="Inventory AI",
+    title="Reorder AI",
     description=(
-        "Store-facing API: W-1 detect-order, uploads, train, and explainability."
+        "W-1 detect-order API for Wecomm. "
+        "TL UI calls these endpoints; this service does not own the storefront UI."
     ),
-    version="1.1.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -46,23 +39,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(uploads.router)
-app.include_router(train.router)
 app.include_router(system.router)
-app.include_router(explain.router)
-app.include_router(vendor_order.router)
 app.include_router(detect_order.router)
-
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/")
-async def store_ui() -> FileResponse:
-    index = STATIC_DIR / "index.html"
-    if not index.exists():
-        raise RuntimeError("Store UI missing: api/static/index.html")
-    return FileResponse(index)
+async def root() -> dict:
+    return {
+        "service": "reorder-ai",
+        "docs": "/docs",
+        "endpoints": {
+            "health": "GET /api/health",
+            "db_health": "GET /api/db-health",
+            "list_vendors": "GET /api/detect-order",
+            "detect_order": "POST /api/detect-order",
+            "order_run": "GET /api/detect-order/runs/{run_id}",
+        },
+    }
 
 
 def create_app() -> FastAPI:

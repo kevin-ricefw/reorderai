@@ -1,1 +1,1 @@
-"""Pydantic schemas for API payloads."""
+"""API request/response schemas."""

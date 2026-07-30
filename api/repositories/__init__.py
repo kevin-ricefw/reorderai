@@ -1,1 +1,1 @@
-"""DB repository packages."""
+"""DB / forecast data access."""

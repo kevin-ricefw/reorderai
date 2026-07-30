@@ -1,3 +1,3 @@
-"""Analytics, forecasting, and inventory math for POS reorder workflow."""
+"""Reorder math and (later) forecasting engines."""
 
-__all__ = ["analytics", "forecasting", "inventory_math"]
+__all__ = ["inventory_math"]

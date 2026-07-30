@@ -1,4 +1,4 @@
-# Environment / secrets
+# Secrets
 .env
 .env.local
 .env.*.local
@@ -9,38 +9,16 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.pytest_cache/
 dist/
 build/
-.pytest_cache/
 
-# IDE
+# IDE / OS
 .idea/
 .vscode/
-*.swp
-
-# Outputs & trained artifacts
-outputs/*
-!outputs/.gitkeep
-models/*
-!models/.gitkeep
-
-# Runtime cache (order runs, weather, etc.)
-data/cache/*
-!data/cache/.gitkeep
-
-# Local POS / store dumps — do not commit
-data/sales/
-data/vendors/
-data/inventory/
-data/Past Invoices/
-data/waste/
-data/delivery_timings/
-data/sandbox_exports/
-data/*.zip
-
-# Notebooks
-.ipynb_checkpoints/
-
-# OS
 .DS_Store
 Thumbs.db
+
+# Runtime cache (detect-order run_ids)
+data/cache/*
+!data/cache/.gitkeep
