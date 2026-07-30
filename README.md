@@ -1,8 +1,19 @@
 # Reorder AI (Wecomm)
 
-Backend for **W-1 detect-order**: TL UI sends vendor + lead time + days to cover; this API returns the order list, stock math, and justification.
+Detect-order API: vendor + lead time + days to cover → order list, stock math, and justification.
 
-Phases 1–3 from the design doc are implemented as APIs + nightly batch (no storefront UI in this repo).
+```text
+Local / tenant demand history
+        │
+        ▼
+Nightly forecast batch  →  data/forecast_store/ (P50/P90)
+        │
+        ▼
+POST /api/detect-order  →  order lines + run_id
+        │
+        ▼
+Chatbot tools (scoped to run_id)
+```
 
 ---
 
@@ -13,7 +24,7 @@ pip install -r requirements.txt
 cp .env.example .env   # fill DB_* + optional OPENAI_API_KEY
 # Start Bastion + SSH tunnel to 127.0.0.1:5433 first
 
-python scripts/run_nightly_forecast.py   # Phase-1/2 batch → data/forecast_store/
+python scripts/run_nightly_forecast.py   # forecast batch → data/forecast_store/
 python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -22,13 +33,13 @@ python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-## TL UI endpoints
+## Workflow endpoints
 
 | Call | Purpose |
 |------|---------|
-| `GET /api/detect-order` | Vendor dropdown |
+| `GET /api/detect-order` | Vendor list |
 | `POST /api/detect-order` | `{vendor_id, lead_time_days, time_to_cover_days}` → order list |
-| `GET /api/detect-order/runs/{run_id}` | Saved run (Decision 8) |
+| `GET /api/detect-order/runs/{run_id}` | Saved run |
 | `GET /api/chatbot/tools` | Approved chatbot tools |
 | `POST /api/chatbot/ask` | `{run_id, question}` → tool-grounded answer |
 | `POST /api/chatbot/tool` | Call a specific approved tool |
@@ -46,7 +57,7 @@ POST /api/detect-order
 
 ---
 
-## Architecture (design doc)
+## Forecast pipeline
 
 ```text
 Nightly batch
@@ -54,19 +65,21 @@ Nightly batch
   → Smooth: LightGBM (else bootstrap)
   → Intermittent: Croston-SBA + Monte Carlo P50/P90
   → Erratic/Lumpy: TSB + Monte Carlo
-  → optional Phase-2 category uplift (UPLIFT_ENABLED=1)
+  → optional category uplift (UPLIFT_ENABLED=1)
   → data/forecast_store/
 
-Detect-order API
+Detect-order
   vendors / catalog / stock from Wecomm
   read P50/P90 from forecast_store
   order = P90 − stock (+ expiry cap, box round)
-  GPT/template justification
+  justification
   save run_id
 
-Chatbot (Phase 3)
-  scoped to run_id; fixed tools only — never free SQL
+Chatbot
+  scoped to run_id; fixed tools only
 ```
+
+Demand preference for the batch: local dated POS sales (if present) → `ai_pos_daily_sales` → live `orders`.
 
 ---
 
@@ -74,13 +87,16 @@ Chatbot (Phase 3)
 
 | Path | Role |
 |------|------|
-| `api/routes/detect_order.py` | W-1 API |
+| `api/routes/detect_order.py` | Detect-order API |
 | `api/routes/chatbot.py` | Investigate chatbot |
-| `api/repositories/` | Live Wecomm + forecast_store reads |
+| `api/repositories/` | Wecomm + forecast_store reads |
 | `v2/forecasting/` | Classification, Croston/TSB, MC, LightGBM, uplift |
 | `v2/inventory_math/` | SS / ROP / pack helpers |
 | `scripts/run_nightly_forecast.py` | Nightly batch |
+| `scripts/import_local_to_paul.py` | Optional local → tenant import |
 | `docs/` | Architecture + phase notes |
+
+Local `data/` dumps (sales, inventory, vendors) are **not** committed.
 
 ---
 
@@ -91,6 +107,7 @@ TENANT_SCHEMA=wecomm_019fafca-fa67-7393-84c4-4ec423f88c15
 DETECT_ORDER_USE_LIVE_SQL=1
 FORECAST_STORE_USE_BATCH=1
 FORECAST_STORE_USE_LIVE_SQL=1
+FORECAST_USE_LOCAL_SALES=auto
 UPLIFT_ENABLED=0
 OPENAI_API_KEY=
 ```

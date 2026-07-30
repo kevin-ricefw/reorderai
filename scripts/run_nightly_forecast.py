@@ -36,6 +36,7 @@ def main() -> int:
     get_settings.cache_clear()
 
     print(f"Loading daily demand (lookback={args.lookback_days}d)...")
+    print("  source preference: local Product Sales CSVs -> ai_pos_daily_sales -> Paul orders")
     daily = load_daily_demand(lookback_days=args.lookback_days)
     print(f"  rows={len(daily)}  skus={daily['item_id'].nunique() if not daily.empty else 0}")
     cats = load_item_categories()

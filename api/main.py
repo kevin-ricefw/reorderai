@@ -1,5 +1,5 @@
 """
-Reorder AI API — TL integration endpoints (Phases 1–3).
+Reorder AI API — detect-order, forecast_store, chatbot.
 
   uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 """
@@ -25,8 +25,7 @@ from api.routes import chatbot, detect_order, system  # noqa: E402
 app = FastAPI(
     title="Reorder AI",
     description=(
-        "Wecomm W-1 detect-order + Phase-1 forecast_store + Phase-3 investigate chatbot. "
-        "TL UI owns the storefront; this service exposes APIs only."
+        "Wecomm detect-order + forecast_store + investigate chatbot. APIs only."
     ),
     version="3.0.0",
 )
