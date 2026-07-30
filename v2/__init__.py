@@ -1,3 +1,3 @@
-"""Reorder math and (later) forecasting engines."""
+"""Reorder math and Phase-1 forecasting engines."""
 
-__all__ = ["inventory_math"]
+__all__ = ["inventory_math", "forecasting"]

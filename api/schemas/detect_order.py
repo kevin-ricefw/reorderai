@@ -91,7 +91,7 @@ class DetectOrderResponse(BaseModel):
     total_units_to_order: float = 0.0
     items: list[DetectOrderItem] = Field(default_factory=list)
     db_mode: Literal["stub", "live"] = "stub"
-    forecast_mode: Literal["stub", "live"] = "stub"
+    forecast_mode: Literal["stub", "live", "batch"] = "stub"
     message: str = ""
 
 

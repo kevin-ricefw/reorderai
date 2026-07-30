@@ -1,5 +1,5 @@
 """
-Reorder AI API — endpoints for TL UI integration.
+Reorder AI API — TL integration endpoints (Phases 1–3).
 
   uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 """
@@ -20,15 +20,15 @@ if str(ROOT) not in sys.path:
 
 load_dotenv(ROOT / ".env", override=True)
 
-from api.routes import detect_order, system  # noqa: E402
+from api.routes import chatbot, detect_order, system  # noqa: E402
 
 app = FastAPI(
     title="Reorder AI",
     description=(
-        "W-1 detect-order API for Wecomm. "
-        "TL UI calls these endpoints; this service does not own the storefront UI."
+        "Wecomm W-1 detect-order + Phase-1 forecast_store + Phase-3 investigate chatbot. "
+        "TL UI owns the storefront; this service exposes APIs only."
     ),
-    version="2.0.0",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -41,12 +41,14 @@ app.add_middleware(
 
 app.include_router(system.router)
 app.include_router(detect_order.router)
+app.include_router(chatbot.router)
 
 
 @app.get("/")
 async def root() -> dict:
     return {
         "service": "reorder-ai",
+        "version": "3.0.0",
         "docs": "/docs",
         "endpoints": {
             "health": "GET /api/health",
@@ -54,6 +56,10 @@ async def root() -> dict:
             "list_vendors": "GET /api/detect-order",
             "detect_order": "POST /api/detect-order",
             "order_run": "GET /api/detect-order/runs/{run_id}",
+            "chatbot_tools": "GET /api/chatbot/tools",
+            "chatbot_ask": "POST /api/chatbot/ask",
+            "chatbot_tool": "POST /api/chatbot/tool",
+            "nightly_batch": "python scripts/run_nightly_forecast.py",
         },
     }
 

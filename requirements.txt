@@ -12,9 +12,12 @@ psycopg2-binary>=2.9.0
 fastapi>=0.128.0
 uvicorn[standard]>=0.27.0
 
-# Math / data (forecast pipeline later)
+# Math / forecasting (Phase 1)
 pandas>=2.0.0
 numpy>=1.26.0
+pyarrow>=14.0.0
+# Phase 1 Smooth path uses bootstrap; LightGBM optional for later upgrade
+lightgbm>=4.0.0
 
 # Optional GPT justification
 openai>=1.40.0

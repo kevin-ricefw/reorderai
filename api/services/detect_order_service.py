@@ -87,30 +87,28 @@ def _gpt_or_template_justification(
     try:
         from api.services.explain_service import explain_reorder
 
-        ctx = {
-            "description": item.description,
-            "upc": item.upc,
-            "demand_class": item.demand_class,
-            "current_stock": item.available_stock,
-            "lead_time_days": lead,
-            "days_to_cover": cover,
-            "forecast_horizon_days": item.horizon_days,
-            "ml_forecast_demand": item.p90_demand,
-            "order_qty": item.qty_to_order,
-            "pack_size": item.box_qty,
-            "order_math_note": base,
-            "projected_stock_required": item.projected_stock_required,
-            "projected_stock_at_arrival": item.projected_stock_at_arrival,
-            "expiry_capped": item.expiry_capped,
-            "last_pallet_qty": item.last_pallet_qty,
-        }
         answer = explain_reorder(
-            "Explain in 2-4 short sentences why this order quantity is recommended. "
-            "Use only the provided numbers.",
-            ctx,
+            "Explain why this order quantity is recommended.",
+            {
+                "description": item.description,
+                "upc": item.upc,
+                "demand_class": item.demand_class,
+                "available_stock": item.available_stock,
+                "lead_time_days": lead,
+                "time_to_cover_days": cover,
+                "horizon_days": item.horizon_days,
+                "p50_demand": item.p50_demand,
+                "p90_demand": item.p90_demand,
+                "qty_to_order": item.qty_to_order,
+                "box_qty": item.box_qty,
+                "expiry_capped": item.expiry_capped,
+                "expiration_days_remaining": item.expiration_days_remaining,
+                "last_pallet_qty": item.last_pallet_qty,
+                "template": base,
+            },
         )
-        if answer and not answer.lower().startswith("openai"):
-            return answer.strip()
+        if answer and not answer.lower().startswith("openai unavailable"):
+            return answer
     except Exception:
         pass
     return base
@@ -161,6 +159,22 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
 
     # Step 1 — fetch items
     raw_items = repo.fetch_vendor_items(vendor_id)
+    if not raw_items:
+        return DetectOrderResponse(
+            ok=True,
+            vendors=vendors,
+            vendor=vendor_info,
+            lead_time_days=lead,
+            time_to_cover_days=cover,
+            x_days=x_days,
+            db_mode=repo.mode,  # type: ignore[arg-type]
+            forecast_mode=store.mode,  # type: ignore[arg-type]
+            message=(
+                f"No catalog items for vendor {vendor_name}. "
+                "Need rows in product_vendor (or vendor_order_products as fallback)."
+            ),
+        )
+
     item_ids = [str(it["item_id"]) for it in raw_items]
 
     # Step 2 — fetch available stock
@@ -176,12 +190,14 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         exp_days = it.get("expiration_days_remaining")
         exp_days_f = float(exp_days) if exp_days is not None else None
         last_pallet = it.get("last_pallet_qty")
-        demand_class = it.get("demand_class")
+        demand_class = it.get("demand_class") or store.demand_class_for(item_id)
 
-        # Step 3 — read forecast for X days (nearest stored horizon)
+        # Step 3 — read P50/P90 from forecast_store (batch), else ADS fallback
         fc = store.get_forecast(
             item_id, horizon_days=x_days, demand_class=str(demand_class) if demand_class else None
         )
+        if demand_class is None and fc.get("demand_class"):
+            demand_class = fc.get("demand_class")
         p50_full = float(fc["p50"])
         p90_full = float(fc["p90"])
         stored_h = int(fc["horizon_days"])
