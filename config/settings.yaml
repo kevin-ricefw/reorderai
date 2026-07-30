@@ -1,0 +1,103 @@
+# Inventory AI — Application Configuration
+# Database secrets come from .env (DB_HOST, DB_USERNAME, DB_PASSWORD, ...).
+
+app:
+  name: "Inventory AI Reorder Prediction System"
+  environment: "development"
+  log_level: "INFO"
+
+# Single Wecomm Azure PostgreSQL database (via SSH tunnel locally)
+# Direct: DB_HOST=wecomm.postgres.database.azure.com DB_PORT=5432
+# Tunnel:  DB_HOST=127.0.0.1 DB_PORT=5433  (localhost:5433 -> Azure:5432)
+database:
+  dialect: "postgresql"
+  host: "${DB_HOST:127.0.0.1}"
+  port: ${DB_PORT:5433}
+  database: "${DB_DATABASE:postgres}"
+  username: "${DB_USERNAME:wecomm_admin}"
+  password: "${DB_PASSWORD:}"
+  sslmode: "${DB_SSLMODE:require}"
+  read_only: false
+  connection_timeout: 30
+  query_timeout: 120
+
+synthetic_data:
+  seed: 42
+  output_dir: "outputs/synthetic"
+  table_prefix: ""
+  default_row_count: 0
+  row_counts:
+    products: 200
+    vendors: 50
+    warehouse_locations: 20
+    orders: 1000
+    order_items: 3000
+    vendor_orders: 500
+    warehouse_checkins: 800
+    cycle_counts: 400
+
+feature_engineering:
+  output_dir: "outputs/features"
+  schema: "public"
+  reference_date: null
+  write_database: true
+  recreate_table: true
+
+ml:
+  models_dir: "models"
+  test_size: 0.2
+  random_state: 42
+  classification:
+    target: "reorder_needed"
+    models:
+      - lightgbm
+      - random_forest
+      - xgboost
+  regression:
+    target: "recommended_reorder_quantity"
+    gate: "classification_yes_only"
+    models:
+      - lightgbm
+      - random_forest
+      - xgboost
+    selection_metric: "r2"
+  explainability:
+    shap_top_n: 5
+    include_regression_shap: true
+
+prediction_engine:
+  output_dir: "outputs/predictions"
+  schema: "public"
+  default_horizon_days: 30
+  suggestions_table: "ai_predicted_replenishment_suggestions"
+  default_status: "Pending"
+  persist_reorder_only: true
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  reload: true
+
+dashboard:
+  port: 8501
+
+v2:
+  enabled: true
+  use_feature_store: true
+  feature_store_table: ai_feature_store
+  mlflow:
+    enabled: true
+    experiment_name: inventory_ai_reorder_v2
+    tracking_uri: mlruns
+  drift:
+    retrain_interval_days: 30
+    data_drift_psi: 0.2
+  business_rules:
+    enforce_dynamic_rop: true
+    enforce_safety_stock: true
+    min_reorder_quantity: 1
+  seasonality:
+    enabled: true
+    history_days: 365
+    min_history_days: 90
+    method: monthly_index_12mo

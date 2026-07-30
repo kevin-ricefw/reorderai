@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Inventory AI — Store Uploads</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <header class="top">
+    <div class="brand-block">
+      <p class="eyebrow">Okemos store ops</p>
+      <h1 class="brand">Inventory AI</h1>
+      <p class="lede">Upload today’s sales and inventory, then train so every aisle gets fresh reorder numbers.</p>
+    </div>
+    <div class="status-pill" id="healthPill">Checking…</div>
+  </header>
+
+  <main class="stage">
+    <section class="panel upload-panel" aria-labelledby="sales-title">
+      <div class="panel-head">
+        <h2 id="sales-title">Upload new sale</h2>
+        <p>One day POS export. Name it <code>Product Sales JULY 24.csv</code> or pick the date below.</p>
+      </div>
+      <label class="drop" id="salesDrop">
+        <input type="file" id="salesFile" accept=".csv,text/csv" hidden />
+        <span class="drop-title">Drop sales CSV here</span>
+        <span class="drop-sub">or click to browse</span>
+        <span class="file-name" id="salesFileName"></span>
+      </label>
+      <div class="row">
+        <label class="field">
+          <span>Sale date</span>
+          <input type="date" id="saleDate" />
+        </label>
+        <button type="button" class="btn primary" id="salesUploadBtn">Upload sales</button>
+      </div>
+      <p class="msg" id="salesMsg" role="status"></p>
+    </section>
+
+    <section class="panel upload-panel" aria-labelledby="inv-title">
+      <div class="panel-head">
+        <h2 id="inv-title">Upload new inventory count</h2>
+        <p>Replaces the live on-hand sheet used for reorder math.</p>
+      </div>
+      <label class="drop" id="invDrop">
+        <input type="file" id="invFile" accept=".csv,text/csv" hidden />
+        <span class="drop-title">Drop inventory CSV here</span>
+        <span class="drop-sub">or click to browse</span>
+        <span class="file-name" id="invFileName"></span>
+      </label>
+      <div class="row">
+        <button type="button" class="btn primary" id="invUploadBtn">Upload inventory</button>
+      </div>
+      <p class="msg" id="invMsg" role="status"></p>
+    </section>
+
+    <section class="panel train-panel" aria-labelledby="train-title">
+      <div class="panel-head">
+        <h2 id="train-title">Train now</h2>
+        <p>Rebuilds demand forecasts and order-now lists on everything currently uploaded.</p>
+      </div>
+      <div class="data-strip" id="dataStrip">
+        <div><span class="label">Sales days</span><strong id="salesCount">—</strong></div>
+        <div><span class="label">Window</span><strong id="salesWindow">—</strong></div>
+        <div><span class="label">Inventory SKUs</span><strong id="invSkus">—</strong></div>
+      </div>
+      <button type="button" class="btn train" id="trainBtn">Train now</button>
+      <div class="train-progress" id="trainProgress" hidden>
+        <div class="bar"><i id="trainBar"></i></div>
+        <p id="trainMsg">Starting…</p>
+      </div>
+      <div class="results" id="results" hidden>
+        <h3>Latest results</h3>
+        <ul id="resultList"></ul>
+        <a class="link" id="orderNowLink" href="/api/outputs/order_now_list.csv">Download order-now list</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>API docs: <a href="/docs">/docs</a></span>
+    <span id="serverClock"></span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

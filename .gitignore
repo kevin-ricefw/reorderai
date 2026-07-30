@@ -1,0 +1,46 @@
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Outputs & trained artifacts
+outputs/*
+!outputs/.gitkeep
+models/*
+!models/.gitkeep
+
+# Runtime cache (order runs, weather, etc.)
+data/cache/*
+!data/cache/.gitkeep
+
+# Local POS / store dumps — do not commit
+data/sales/
+data/vendors/
+data/inventory/
+data/Past Invoices/
+data/waste/
+data/delivery_timings/
+data/sandbox_exports/
+data/*.zip
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
