@@ -2,6 +2,9 @@
 
 Detect-order API: vendor + lead time + days to cover → order list, stock math, and justification.
 
+**Full system map (folders, file connections, ML, endpoints):**  
+[`docs/COMPLETE_SYSTEM_WORKFLOW.md`](docs/COMPLETE_SYSTEM_WORKFLOW.md)
+
 ```text
 Local / tenant demand history
         │
@@ -94,6 +97,7 @@ Demand preference for the batch: local dated POS sales (if present) → `ai_pos_
 | `v2/inventory_math/` | SS / ROP / pack helpers |
 | `scripts/run_nightly_forecast.py` | Nightly batch |
 | `scripts/import_local_to_paul.py` | Optional local → tenant import |
+| `docs/COMPLETE_SYSTEM_WORKFLOW.md` | Full workflow + folder/file map |
 | `docs/` | Architecture + phase notes |
 
 Local `data/` dumps (sales, inventory, vendors) are **not** committed.
