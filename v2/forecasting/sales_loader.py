@@ -60,15 +60,23 @@ def load_upc_to_product_id(
     return out
 
 
+def _lookback_clause(column_sql: str, lookback_days: int | None) -> str:
+    """Empty string = all history. lookback_days <= 0 means all."""
+    if lookback_days is None or int(lookback_days) <= 0:
+        return ""
+    days = max(int(lookback_days), 14)
+    return f"AND {column_sql} >= (CURRENT_DATE - INTERVAL '{days} days')"
+
+
 def load_daily_demand_from_paul(
     *,
-    lookback_days: int = 180,
+    lookback_days: int | None = 0,
     schema: str | None = None,
     connector: WecommDatabaseConnector | None = None,
 ) -> pd.DataFrame:
     db = connector or WecommDatabaseConnector()
     sch = q_ident(schema or get_tenant_schema())
-    days = max(int(lookback_days), 14)
+    lb = _lookback_clause("DATE(o.created_at)", lookback_days)
 
     df = db.read_sql(
         f"""
@@ -86,7 +94,7 @@ def load_daily_demand_from_paul(
         WHERE o.deleted_at IS NULL
           AND oi.deleted_at IS NULL
           AND COALESCE(o.is_return, FALSE) = FALSE
-          AND o.created_at >= (NOW() - INTERVAL '{days} days')
+          {lb}
         GROUP BY oi.product_id, DATE(o.created_at)
         ORDER BY oi.product_id, DATE(o.created_at)
         """
@@ -105,7 +113,7 @@ def load_daily_demand_from_paul(
 
 def load_daily_demand_from_ai_table(
     *,
-    lookback_days: int = 180,
+    lookback_days: int | None = 0,
     schema: str | None = None,
     connector: WecommDatabaseConnector | None = None,
 ) -> pd.DataFrame:
@@ -113,7 +121,8 @@ def load_daily_demand_from_ai_table(
     try:
         db = connector or WecommDatabaseConnector()
         sch = q_ident(schema or get_tenant_schema())
-        days = max(int(lookback_days), 14)
+        lb = _lookback_clause("sale_date", lookback_days)
+        where_extra = f"WHERE 1=1 {lb}" if lb else ""
         df = db.read_sql(
             f"""
             SELECT
@@ -121,7 +130,7 @@ def load_daily_demand_from_ai_table(
               sale_date,
               SUM(quantity) AS quantity
             FROM {sch}.ai_pos_daily_sales
-            WHERE sale_date >= (CURRENT_DATE - INTERVAL '{days} days')
+            {where_extra}
             GROUP BY 1, 2
             ORDER BY 1, 2
             """
@@ -141,32 +150,37 @@ def load_daily_demand_from_ai_table(
 
 def load_daily_demand(
     *,
-    lookback_days: int = 180,
+    lookback_days: int | None = 0,
     schema: str | None = None,
     connector: WecommDatabaseConnector | None = None,
 ) -> pd.DataFrame:
     """
     Returns columns: item_id (str), date (datetime64[ns]), quantity (float)
 
+    lookback_days: 0 or None = use full available history (recommended).
+
     Priority:
       1. Local ``data/sales/Product Sales*.csv`` when FORECAST_USE_LOCAL_SALES=auto/1
       2. Paul ``ai_pos_daily_sales`` (after import)
       3. Paul ``orders`` × ``order_items``
     """
+    # Normalize: <=0 means all history for local loader too
+    lb = None if lookback_days is None or int(lookback_days) <= 0 else int(lookback_days)
+
     if _use_local_sales():
-        local = load_local_pos_daily_sales(lookback_days=lookback_days)
+        local = load_local_pos_daily_sales(lookback_days=lb)
         if not local.empty:
             upc_map = load_upc_to_product_id(schema=schema, connector=connector)
             return local_sales_to_demand(local, upc_to_item_id=upc_map or None)
 
     ai = load_daily_demand_from_ai_table(
-        lookback_days=lookback_days, schema=schema, connector=connector
+        lookback_days=lb, schema=schema, connector=connector
     )
     if not ai.empty:
         return ai
 
     return load_daily_demand_from_paul(
-        lookback_days=lookback_days, schema=schema, connector=connector
+        lookback_days=lb, schema=schema, connector=connector
     )
 
 

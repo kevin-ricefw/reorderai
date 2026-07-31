@@ -68,6 +68,7 @@ Nightly batch
   → Smooth: LightGBM (else bootstrap)
   → Intermittent: Croston-SBA + Monte Carlo P50/P90
   → Erratic/Lumpy: TSB + Monte Carlo
+  → per-SKU weekend/festival uplift (learned; SKU_UPLIFT_ENABLED=1)
   → optional category uplift (UPLIFT_ENABLED=1)
   → data/forecast_store/
 
@@ -112,6 +113,8 @@ DETECT_ORDER_USE_LIVE_SQL=1
 FORECAST_STORE_USE_BATCH=1
 FORECAST_STORE_USE_LIVE_SQL=1
 FORECAST_USE_LOCAL_SALES=auto
+FORECAST_LOOKBACK_DAYS=0
+SKU_UPLIFT_ENABLED=1
 UPLIFT_ENABLED=0
 OPENAI_API_KEY=
 ```

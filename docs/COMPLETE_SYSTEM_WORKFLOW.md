@@ -129,7 +129,9 @@ All live queries use: `{TENANT_SCHEMA}.vendors`, `.products`, `.product_vendor`,
 | `smooth_lgbm.py` | **Smooth** model: pooled LightGBM (fallback: bootstrap) |
 | `croston.py` | Croston-SBA + TSB parameter fits |
 | `monte_carlo.py` | Simulate horizon demand → **P50 / P90** |
-| `uplift.py` | Optional category festival/weather multipliers (`UPLIFT_ENABLED=1`) |
+| `festival_calendar.py` | India + USA festival/holiday date tags |
+| `sku_uplift.py` | Learn per-SKU weekend/festival multipliers from history |
+| `uplift.py` | Apply SKU uplift (default on) + optional category rules |
 | `pipeline.py` | Orchestrates: classify → fit LightGBM → forecast each SKU → uplift |
 | `forecast_store_io.py` | Write/read parquet/csv artifacts under `data/forecast_store/` |
 
@@ -381,7 +383,9 @@ Interactive docs: `http://localhost:8000/docs`
 | `FORECAST_STORE_USE_BATCH=1` | Prefer nightly P50/P90 files |
 | `FORECAST_STORE_USE_LIVE_SQL=1` | ADS fallback if batch missing |
 | `FORECAST_USE_LOCAL_SALES=auto` | Prefer local POS CSVs for batch |
-| `UPLIFT_ENABLED=0` | Festival/weather uplift off until validated |
+| `FORECAST_LOOKBACK_DAYS=0` | `0` = train on all available sales history |
+| `SKU_UPLIFT_ENABLED=1` | Per-SKU weekend/festival uplift learned from data |
+| `UPLIFT_ENABLED=0` | Coarse category-wide uplift (optional; keep off) |
 | `OPENAI_API_KEY` | Optional GPT justifications |
 
 ---

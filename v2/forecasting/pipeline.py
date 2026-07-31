@@ -130,6 +130,7 @@ def build_forecast_store_frame(
         item_category=item_category,
         as_of=as_of,
         weather_hot=weather_hot,
+        daily=daily,
     )
     return classifications, forecasts
 

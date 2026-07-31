@@ -1,8 +1,10 @@
 """
-Phase 2 — category-level weather / festival uplift (Decision 6).
+Demand uplift applied after base P50/P90.
 
-Toggle with UPLIFT_ENABLED=1. Factors are config-driven so a wrong uplift
-never ships silently; default table is conservative / off unless enabled.
+1) Per-SKU learned weekend/festival multipliers (SKU_UPLIFT_ENABLED, default on)
+2) Optional coarse category rules (UPLIFT_ENABLED, default off)
+
+SKU uplift is selective: only items that historically spike get m > 1.
 """
 
 from __future__ import annotations
@@ -13,15 +15,20 @@ from typing import Any
 
 import pandas as pd
 
-# category_key (lower) → list of rules
-# multiplier applies to P50/P90 when rule matches as_of date
+from v2.forecasting.sku_uplift import (
+    learn_sku_uplift_table,
+    sku_multiplier_for_date,
+    sku_uplift_enabled,
+    summarize_sku_uplift,
+)
+
+# category_key (lower) → list of rules (legacy / optional)
 DEFAULT_FESTIVAL_RULES: list[dict[str, Any]] = [
-    # Example validated-style rules (disabled unless UPLIFT_ENABLED)
     {
         "name": "diwali_week",
         "months": [10, 11],
         "day_range": (1, 20),
-        "categories": ["*"],  # all categories when enabled
+        "categories": ["*"],
         "multiplier": 1.15,
     },
     {
@@ -35,6 +42,7 @@ DEFAULT_FESTIVAL_RULES: list[dict[str, Any]] = [
 
 
 def uplift_enabled() -> bool:
+    """Category-rule uplift (coarse). Off by default."""
     return os.getenv("UPLIFT_ENABLED", "0").lower() in {"1", "true", "yes"}
 
 
@@ -54,10 +62,7 @@ def category_multiplier(
     as_of: str | date | datetime | None = None,
     weather_hot: bool = False,
 ) -> tuple[float, str | None]:
-    """
-    Return (multiplier, rule_name). 1.0 when disabled / no match.
-    weather_hot can boost summer beverage rule further.
-    """
+    """Return (multiplier, rule_name). 1.0 when disabled / no match."""
     if not uplift_enabled():
         return 1.0, None
 
@@ -91,21 +96,55 @@ def apply_uplift_to_forecasts(
     item_category: dict[str, str] | None = None,
     as_of: str | None = None,
     weather_hot: bool = False,
+    daily: pd.DataFrame | None = None,
+    sku_uplift_table: dict[str, dict[str, float]] | None = None,
 ) -> pd.DataFrame:
-    """Multiply p50/p90 by category uplift; add uplift_* columns."""
+    """
+    Multiply p50/p90 by best applicable uplift.
+
+    Priority: max(sku_learned, category_rule) — never blanket-apply to all SKUs
+    via SKU path; category rules only if UPLIFT_ENABLED=1.
+    """
     if forecasts.empty:
         return forecasts
 
     out = forecasts.copy()
     cats = item_category or {}
+    table = sku_uplift_table
+    if table is None and daily is not None and sku_uplift_enabled():
+        table = learn_sku_uplift_table(daily)
+    table = table or {}
+
     multis: list[float] = []
     names: list[str | None] = []
     for item_id in out["item_id"].astype(str):
-        m, n = category_multiplier(cats.get(item_id), as_of=as_of, weather_hot=weather_hot)
-        multis.append(m)
-        names.append(n)
+        sku_m, sku_n = sku_multiplier_for_date(item_id, table, as_of=as_of)
+        cat_m, cat_n = category_multiplier(
+            cats.get(item_id), as_of=as_of, weather_hot=weather_hot
+        )
+        if sku_m >= cat_m and sku_m > 1.0:
+            multis.append(sku_m)
+            names.append(sku_n)
+        elif cat_m > 1.0:
+            multis.append(cat_m)
+            names.append(cat_n)
+        else:
+            multis.append(1.0)
+            names.append(None)
+
     out["uplift_multiplier"] = multis
     out["uplift_rule"] = names
     out["p50"] = (out["p50"].astype(float) * out["uplift_multiplier"]).round(4)
     out["p90"] = (out["p90"].astype(float) * out["uplift_multiplier"]).round(4)
     return out
+
+
+__all__ = [
+    "DEFAULT_FESTIVAL_RULES",
+    "apply_uplift_to_forecasts",
+    "category_multiplier",
+    "learn_sku_uplift_table",
+    "sku_uplift_enabled",
+    "summarize_sku_uplift",
+    "uplift_enabled",
+]
