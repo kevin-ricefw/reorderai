@@ -10,14 +10,20 @@ Read order (Design Decision 5):
 from __future__ import annotations
 
 import os
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
 
 from database.connectors.wecomm import WecommDatabaseConnector
 from database.tenant import get_tenant_schema, q_ident
-from v2.forecasting.forecast_store_io import load_latest_classifications, load_latest_forecasts
+from v2.forecasting.forecast_store_io import (
+    load_latest_classifications,
+    load_latest_forecasts,
+    load_latest_sku_uplift,
+)
 from v2.forecasting.pipeline import STANDARD_HORIZONS
+from v2.forecasting.sku_uplift import sku_multiplier_for_date, sku_uplift_enabled
 
 SALES_LOOKBACK_DAYS = 30
 
@@ -43,6 +49,7 @@ class ForecastStore:
         self._db: WecommDatabaseConnector | None = None
         self._batch: pd.DataFrame | None = None
         self._classes: pd.DataFrame | None = None
+        self._sku_uplift: dict[str, dict[str, float]] | None = None
         self._ads_cache: dict[str, float] | None = None
         self._mode = "stub"
 
@@ -63,7 +70,25 @@ class ForecastStore:
         df = load_latest_forecasts()
         self._batch = df if df is not None else pd.DataFrame()
         self._classes = load_latest_classifications()
+        self._sku_uplift = load_latest_sku_uplift()
         return self._batch if not self._batch.empty else None
+
+    def _window_sku_uplift(self, item_id: str, horizon_days: int) -> tuple[float, str | None]:
+        """Max learned SKU uplift across days in the upcoming order window."""
+        if not sku_uplift_enabled():
+            return 1.0, None
+        table = self._sku_uplift if self._sku_uplift is not None else load_latest_sku_uplift()
+        self._sku_uplift = table
+        if not table:
+            return 1.0, None
+        best = 1.0
+        best_name: str | None = None
+        start = date.today()
+        for i in range(max(int(horizon_days), 1)):
+            m, n = sku_multiplier_for_date(item_id, table, as_of=start + timedelta(days=i))
+            if m > best:
+                best, best_name = m, n
+        return best, best_name
 
     def get_forecast(
         self,
@@ -87,14 +112,22 @@ class ForecastStore:
                 cls = demand_class or (
                     str(row["demand_class"]) if "demand_class" in row else None
                 )
+                p50 = float(row["p50"])
+                p90 = float(row["p90"])
+                uplift_m, uplift_rule = self._window_sku_uplift(item, horizon_days)
+                if uplift_m > 1.0:
+                    p50 = round(p50 * uplift_m, 4)
+                    p90 = round(p90 * uplift_m, 4)
                 return {
                     "item_id": item,
                     "horizon_days": int(h),
-                    "p50": float(row["p50"]),
-                    "p90": float(row["p90"]),
+                    "p50": p50,
+                    "p90": p90,
                     "demand_class": cls,
                     "source": "forecast_store_batch",
                     "model": str(row.get("model", "")),
+                    "uplift_multiplier": uplift_m,
+                    "uplift_rule": uplift_rule,
                 }
 
         if self.use_live_ads and self.configured:

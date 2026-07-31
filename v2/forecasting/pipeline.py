@@ -15,7 +15,6 @@ from v2.forecasting.croston import fit_croston_sba, fit_rule_based, fit_tsb
 from v2.forecasting.monte_carlo import simulate_horizon_demand
 from v2.forecasting.smooth_lgbm import fit_pooled_lightgbm, forecast_smooth_horizons
 from v2.forecasting.syntetos_boylan import classify_demand_series, classify_sku_frame
-from v2.forecasting.uplift import apply_uplift_to_forecasts
 
 STANDARD_HORIZONS = (7, 14, 21, 30, 45)
 
@@ -125,13 +124,12 @@ def build_forecast_store_frame(
         )
 
     forecasts = pd.DataFrame(forecast_rows)
-    forecasts = apply_uplift_to_forecasts(
-        forecasts,
-        item_category=item_category,
-        as_of=as_of,
-        weather_hot=weather_hot,
-        daily=daily,
-    )
+    # Store BASE P50/P90 only. Per-SKU weekend/festival uplift is applied at
+    # detect-order time from the learned table (batch as_of may be a plain weekday).
+    if not forecasts.empty:
+        forecasts = forecasts.copy()
+        forecasts["uplift_multiplier"] = 1.0
+        forecasts["uplift_rule"] = None
     return classifications, forecasts
 
 

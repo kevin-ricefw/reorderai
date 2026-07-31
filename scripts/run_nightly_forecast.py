@@ -63,6 +63,7 @@ def main() -> int:
         f"sku_uplift={sku_uplift_enabled()}  category_uplift={uplift_enabled()}"
     )
 
+    table: dict = {}
     if sku_uplift_enabled() and not daily.empty:
         table = learn_sku_uplift_table(daily)
         print(f"  sku_uplift_learned={summarize_sku_uplift(table)}")
@@ -77,15 +78,17 @@ def main() -> int:
     forecasts = result["forecasts"]
     as_of = str(result["as_of"])
 
-    out = save_forecast_store(classifications, forecasts, as_of=as_of)
+    out = save_forecast_store(
+        classifications,
+        forecasts,
+        as_of=as_of,
+        sku_uplift_table=table,
+    )
     print(f"as_of={as_of}")
     if not classifications.empty:
         print(classifications["demand_class"].value_counts().to_string())
-    if not forecasts.empty and "uplift_multiplier" in forecasts.columns:
-        lifted = forecasts[forecasts["uplift_multiplier"] > 1.0]
-        print(f"forecast rows={len(forecasts)}  rows_with_uplift={len(lifted)}")
-    else:
-        print(f"forecast rows={len(forecasts)}")
+    print(f"forecast rows={len(forecasts)}  (base P50/P90; SKU uplift applied at order time)")
+    print(f"sku_uplift_file_skus={len(table)}")
     print(f"wrote -> {out}")
     return 0
 
