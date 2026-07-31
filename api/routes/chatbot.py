@@ -15,12 +15,12 @@ router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
 
 
 @router.get("/tools")
-async def chatbot_tools_list() -> dict:
+def chatbot_tools_list() -> dict:
     return {"tools": chatbot_tools.list_tools()}
 
 
 @router.post("/ask", response_model=ChatResponse)
-async def chatbot_ask(body: ChatAskRequest) -> ChatResponse:
+def chatbot_ask(body: ChatAskRequest) -> ChatResponse:
     try:
         routed = chatbot_tools.route_question(body.run_id, body.question)
     except ValueError as exc:
@@ -35,7 +35,7 @@ async def chatbot_ask(body: ChatAskRequest) -> ChatResponse:
 
 
 @router.post("/tool", response_model=ChatResponse)
-async def chatbot_tool(body: ChatToolRequest) -> ChatResponse:
+def chatbot_tool(body: ChatToolRequest) -> ChatResponse:
     kwargs: dict = {"run_id": body.run_id}
     if body.tool in {"get_item_details", "why_item"}:
         if not body.item_id:

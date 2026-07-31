@@ -11,7 +11,26 @@ DATA_ROOT = PROJECT_ROOT / "data"
 
 SALES_DIR = DATA_ROOT / "sales"
 INVENTORY_DIR = DATA_ROOT / "inventory"
-INVENTORY_PATH = INVENTORY_DIR / "current inventory count.csv"
+
+
+def resolve_inventory_path() -> Path:
+    """Prefer newest CURRENT INVENTORY COUNT*.csv (case-insensitive)."""
+    candidates = sorted(
+        [
+            p
+            for p in INVENTORY_DIR.glob("*.csv")
+            if "inventory" in p.name.lower() and "count" in p.name.lower()
+        ],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0]
+    legacy = INVENTORY_DIR / "current inventory count.csv"
+    return legacy
+
+
+INVENTORY_PATH = resolve_inventory_path()
 VENDORS_DIR = DATA_ROOT / "vendors"
 PACK_OVERRIDES_PATH = VENDORS_DIR / "pack_overrides.csv"
 # Lead time / cover days are dynamic per detect-order request (UI), not a local schedule file.

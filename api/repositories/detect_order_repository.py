@@ -15,10 +15,18 @@ import pandas as pd
 
 from database.connectors.wecomm import WecommDatabaseConnector
 from database.tenant import get_tenant_schema, q_ident
+from v2.forecasting.local_pos_sales import normalize_upc
+from v2.invoices.past_invoice_loader import last_pallet_qty_for_items
+from config.data_paths import INVENTORY_DIR
 
 
 def _live_enabled() -> bool:
     flag = os.getenv("DETECT_ORDER_USE_LIVE_SQL", "1").lower()
+    return flag in {"1", "true", "yes"}
+
+
+def _invoice_fallback_enabled() -> bool:
+    flag = os.getenv("LAST_PALLET_FROM_INVOICES", "1").lower()
     return flag in {"1", "true", "yes"}
 
 
@@ -28,6 +36,8 @@ class DetectOrderRepository:
         self.live = self.configured and _live_enabled()
         self.schema = get_tenant_schema()
         self._db: WecommDatabaseConnector | None = None
+        self._vendor_name_cache: dict[str, str] = {}
+        self._pack_by_upc: dict[str, int] | None = None
 
     @property
     def mode(self) -> str:
@@ -46,14 +56,21 @@ class DetectOrderRepository:
                 {"vendor_id": "V003", "vendor_name": "DEEP FOODS"},
             ]
         sch = q_ident(self.schema)
-        df = self._conn().read_sql(
-            f"""
-            SELECT id AS vendor_id, name AS vendor_name
-            FROM {sch}.vendors
-            WHERE deleted_at IS NULL
-            ORDER BY name
-            """
-        )
+        try:
+            df = self._conn().read_sql(
+                f"""
+                SELECT id AS vendor_id, name AS vendor_name
+                FROM {sch}.vendors
+                WHERE deleted_at IS NULL
+                ORDER BY name
+                """
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Cannot read tenant vendors — SSH tunnel may be pointing at the wrong "
+                f"Postgres (missing schema {self.schema}). "
+                f"Root: {type(exc).__name__}: {exc}"
+            ) from exc
         return [
             {"vendor_id": str(int(r.vendor_id)), "vendor_name": str(r.vendor_name)}
             for r in df.itertuples(index=False)
@@ -172,7 +189,53 @@ class DetectOrderRepository:
                     "catalog_source": source,
                 }
             )
+
+        # Paul rarely has vendor POs; fill gaps from Past Invoices workbook.
+        if _invoice_fallback_enabled():
+            missing = [it for it in items if it.get("last_pallet_qty") is None]
+            if missing:
+                try:
+                    vname = self._vendor_name(str(vid))
+                    inv_map = last_pallet_qty_for_items(missing, vendor_name=vname)
+                    for it in items:
+                        if it.get("last_pallet_qty") is None and it["item_id"] in inv_map:
+                            it["last_pallet_qty"] = inv_map[it["item_id"]]
+                except Exception:
+                    # Never fail detect-order if invoice parse/match blows up.
+                    pass
+
+        # Prefer real case pack from local products.csv when DB min_reorder is 1/missing.
+        self._enrich_pack_sizes(items)
         return items
+
+    def _local_pack_by_upc(self) -> dict[str, int]:
+        if self._pack_by_upc is not None:
+            return self._pack_by_upc
+        path = INVENTORY_DIR / "products.csv"
+        out: dict[str, int] = {}
+        if path.exists():
+            try:
+                df = pd.read_csv(path, dtype=str)
+                for _, r in df.iterrows():
+                    upc = normalize_upc(r.get("upc"))
+                    pack = pd.to_numeric(r.get("pack"), errors="coerce")
+                    if upc and pd.notna(pack) and float(pack) > 1:
+                        out[upc] = int(float(pack))
+            except Exception:
+                out = {}
+        self._pack_by_upc = out
+        return out
+
+    def _enrich_pack_sizes(self, items: list[dict[str, Any]]) -> None:
+        packs = self._local_pack_by_upc()
+        if not packs:
+            return
+        for it in items:
+            if int(it.get("box_qty") or 1) > 1:
+                continue
+            upc_n = normalize_upc(it.get("upc"))
+            if upc_n and upc_n in packs:
+                it["box_qty"] = packs[upc_n]
 
     def _fetch_expiration_days(self, item_ids: list[int]) -> dict[str, float]:
         """Soonest batch expiration → days remaining (Step 5)."""
@@ -205,6 +268,14 @@ class DetectOrderRepository:
             out[str(int(r.product_id))] = float(max(days, 0))
         return out
 
+    def _vendor_name(self, vendor_id: str) -> str | None:
+        key = str(vendor_id)
+        if key in self._vendor_name_cache:
+            return self._vendor_name_cache[key]
+        for v in self.list_vendors():
+            self._vendor_name_cache[str(v["vendor_id"])] = str(v["vendor_name"])
+        return self._vendor_name_cache.get(key)
+
     def _fetch_last_pallet_qty(self, item_ids: list[int], vendor_id: int) -> dict[str, float]:
         """Latest vendor_order_products.quantity for reference (Step 5)."""
         if not item_ids:
@@ -235,7 +306,10 @@ class DetectOrderRepository:
         }
 
     def fetch_available_stock(self, item_ids: list[str]) -> dict[str, float]:
-        """Step 2 — sum on-hand qty from product_locations."""
+        """Step 2 — sum on-hand qty from product_locations (raw; negatives allowed).
+
+        Detect-order floors negatives to 0 when sizing orders (count-lag scenario).
+        """
         if not self.live:
             stock = {
                 "I1001": 12.0,

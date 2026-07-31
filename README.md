@@ -1,21 +1,25 @@
 # Reorder AI (Wecomm)
 
-Detect-order API: vendor + lead time + days to cover → order list, stock math, and justification.
+Vendor + lead time (**L**) + days to cover (**C**) → reorder sheet with ADS, safety stock, ROP, ML P50/P90, AI target, cases, and Excel.
 
-**Full system map (folders, file connections, ML, endpoints):**  
-[`docs/COMPLETE_SYSTEM_WORKFLOW.md`](docs/COMPLETE_SYSTEM_WORKFLOW.md)
+**Precise flow:** [`docs/W1_DETECT_ORDER_WORKFLOW.md`](docs/W1_DETECT_ORDER_WORKFLOW.md)  
+**Worked example (AASHIRVAAD ATTA):** [`docs/EXAMPLE.md`](docs/EXAMPLE.md)  
+**Full system map:** [`docs/COMPLETE_SYSTEM_WORKFLOW.md`](docs/COMPLETE_SYSTEM_WORKFLOW.md)
 
 ```text
-Local / tenant demand history
-        │
-        ▼
-Nightly forecast batch  →  data/forecast_store/ (P50/P90)
-        │
-        ▼
-POST /api/detect-order  →  order lines + run_id
-        │
-        ▼
-Chatbot tools (scoped to run_id)
+Sales + inventory + vendor map  →  tenant DB
+                │
+                ▼
+Nightly ML batch  →  data/forecast_store/  (class → P50/P90 + uplift)
+                │
+                ▼
+POST /api/detect-order  (X = L + C only)
+  ADS(90d) → SS → ROP flag
+  AI_target = max(P90×uplift, ADS×X+SS)
+  order = pack_round(AI_target − on_hand)   # case if need ≥ 80% pack
+                │
+                ▼
+run_id → Excel export · Streamlit demo · chatbot tools
 ```
 
 ---
@@ -25,14 +29,34 @@ Chatbot tools (scoped to run_id)
 ```bash
 pip install -r requirements.txt
 cp .env.example .env   # fill DB_* + optional OPENAI_API_KEY
-# Start Bastion + SSH tunnel to 127.0.0.1:5433 first
+# Bastion + SSH tunnel → 127.0.0.1:5433
 
-python scripts/run_nightly_forecast.py   # forecast batch → data/forecast_store/
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+python scripts/import_local_to_paul.py --execute   # optional: reload sales/stock/vendors
+python scripts/run_nightly_forecast.py --lookback-days 0
+
+python -m uvicorn api.main:app --host 127.0.0.1 --port 8001
+python -m streamlit run demo_app/streamlit_app.py --server.port 8501
+# or: run_demo.bat
 ```
 
-- API docs: http://localhost:8000/docs  
+- API docs: http://127.0.0.1:8001/docs  
+- Demo UI: http://127.0.0.1:8501  
 - DB check: `GET /api/db-health`
+
+---
+
+## Order math (summary)
+
+| Step | Formula |
+|------|---------|
+| Window | **X = L + C** (no extra days) |
+| ADS | units in last **90** days ÷ 90 |
+| ROP | ADS×L + SS — **flag only** (`below_reorder_point`) |
+| AI target | max(P90 for X × uplift, ADS×X + SS_X) |
+| Qty | max(0, target − on-hand), then case round (≥80% pack) |
+
+ROP false does **not** block an order when on-hand is below the full-window target.  
+See [`docs/EXAMPLE.md`](docs/EXAMPLE.md).
 
 ---
 
@@ -43,18 +67,18 @@ python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 | `GET /api/detect-order` | Vendor list |
 | `POST /api/detect-order` | `{vendor_id, lead_time_days, time_to_cover_days}` → order list |
 | `GET /api/detect-order/runs/{run_id}` | Saved run |
+| `GET /api/detect-order/runs/{run_id}/export.xlsx` | Excel order sheet |
 | `GET /api/chatbot/tools` | Approved chatbot tools |
 | `POST /api/chatbot/ask` | `{run_id, question}` → tool-grounded answer |
-| `POST /api/chatbot/tool` | Call a specific approved tool |
 
-### Example
+### Example request
 
 ```http
 POST /api/detect-order
 {
-  "vendor_id": "2",
-  "lead_time_days": 5,
-  "time_to_cover_days": 7
+  "vendor_id": "18",
+  "lead_time_days": 3,
+  "time_to_cover_days": 14
 }
 ```
 
@@ -65,25 +89,17 @@ POST /api/detect-order
 ```text
 Nightly batch
   classify (Syntetos–Boylan)
-  → Smooth: LightGBM (else bootstrap)
+  → Smooth: LightGBM
   → Intermittent: Croston-SBA + Monte Carlo P50/P90
   → Erratic/Lumpy: TSB + Monte Carlo
-  → per-SKU weekend/festival uplift (learned; SKU_UPLIFT_ENABLED=1)
-  → optional category uplift (UPLIFT_ENABLED=1)
+  → single-demand-day: rule
+  → per-SKU weekend/festival uplift
   → data/forecast_store/
 
-Detect-order
-  vendors / catalog / stock from Wecomm
-  read P50/P90 from forecast_store
-  order = P90 − stock (+ expiry cap, box round)
-  justification
-  save run_id
-
-Chatbot
-  scoped to run_id; fixed tools only
+Detect-order reads those files (no live retrain per click).
 ```
 
-Demand preference for the batch: local dated POS sales (if present) → `ai_pos_daily_sales` → live `orders`.
+Demand preference: local `Product Sales *.csv` → `ai_pos_daily_sales` → live orders.
 
 ---
 
@@ -91,27 +107,27 @@ Demand preference for the batch: local dated POS sales (if present) → `ai_pos_
 
 | Path | Role |
 |------|------|
-| `api/routes/detect_order.py` | Detect-order API |
-| `api/routes/chatbot.py` | Investigate chatbot |
-| `api/repositories/` | Wecomm + forecast_store reads |
-| `v2/forecasting/` | Classification, Croston/TSB, MC, LightGBM, uplift |
-| `v2/inventory_math/` | SS / ROP / pack helpers |
+| `api/services/reorder_engine.py` | ADS / SS / ROP / AI target / cases |
+| `api/services/detect_order_service.py` | Detect-order orchestration |
+| `api/services/order_export.py` | Excel export |
+| `demo_app/streamlit_app.py` | Streamlit demo |
+| `v2/forecasting/` | Classification, Croston/TSB, LightGBM, uplift |
 | `scripts/run_nightly_forecast.py` | Nightly batch |
-| `scripts/import_local_to_paul.py` | Optional local → tenant import |
-| `docs/COMPLETE_SYSTEM_WORKFLOW.md` | Full workflow + folder/file map |
-| `docs/` | Architecture + phase notes |
+| `scripts/import_local_to_paul.py` | Inventory + vendor map + sales → tenant |
+| `docs/EXAMPLE.md` | AASHIRVAAD ATTA worked example |
 
-Local `data/` dumps (sales, inventory, vendors) are **not** committed.
+Local `data/` dumps are **not** committed.
 
 ---
 
 ## Env flags
 
 ```
-TENANT_SCHEMA=wecomm_019fafca-fa67-7393-84c4-4ec423f88c15
+TENANT_SCHEMA=wecomm_…
 DETECT_ORDER_USE_LIVE_SQL=1
 FORECAST_STORE_USE_BATCH=1
 FORECAST_STORE_USE_LIVE_SQL=1
+ADS_LOOKBACK_DAYS=90
 FORECAST_USE_LOCAL_SALES=auto
 FORECAST_LOOKBACK_DAYS=0
 SKU_UPLIFT_ENABLED=1

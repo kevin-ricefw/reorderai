@@ -48,8 +48,14 @@ def tool_list_order_lines(run_id: str, *, only_nonzero: bool = True) -> dict[str
             "item_id": i.get("item_id"),
             "description": i.get("description"),
             "qty_to_order": i.get("qty_to_order"),
+            "cases_to_order": i.get("cases_to_order"),
             "available_stock": i.get("available_stock"),
+            "ads": i.get("ads"),
+            "safety_stock": i.get("safety_stock"),
+            "reorder_point": i.get("reorder_point"),
+            "ai_target_qty": i.get("ai_target_qty"),
             "p90_demand": i.get("p90_demand"),
+            "uplift_multiplier": i.get("uplift_multiplier"),
             "demand_class": i.get("demand_class"),
         }
         for i in items

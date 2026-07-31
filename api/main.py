@@ -55,6 +55,7 @@ async def root() -> dict:
             "list_vendors": "GET /api/detect-order",
             "detect_order": "POST /api/detect-order",
             "order_run": "GET /api/detect-order/runs/{run_id}",
+            "order_excel": "GET /api/detect-order/runs/{run_id}/export.xlsx",
             "chatbot_tools": "GET /api/chatbot/tools",
             "chatbot_ask": "POST /api/chatbot/ask",
             "chatbot_tool": "POST /api/chatbot/tool",

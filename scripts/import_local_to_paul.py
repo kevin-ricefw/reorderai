@@ -1,16 +1,16 @@
 """
-Import local recovered store data → Paul tenant tables (match existing schema).
+Import local store dumps → Paul tenant tables.
 
 Sources → tables
-  data/inventory/current inventory count.csv
-      → vendors (names)
-      → product_vendor (UPC → product_id × vendor)
-      → product_locations.quantity (on-hand)
+  data/inventory/*INVENTORY*COUNT*.csv
+      → vendors (from vendor_name)
+      → products + product_barcodes (create missing UPCs)
+      → product_vendor (UPC × vendor catalog — full refresh)
+      → product_locations.quantity (on-hand — full refresh from file)
   data/sales/Product Sales*.csv
-      → ai_pos_daily_sales  (NOT live POS orders)
+      → ai_pos_daily_sales  (TRUNCATE + reload; NOT live POS orders)
 
 Does NOT wipe live ``orders`` / ``order_items``.
-Gift-card CSV is skipped when codes are Excel-mangled (scientific notation).
 
 Requires SSH tunnel: 127.0.0.1:5433
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -33,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
 
-from config.data_paths import INVENTORY_PATH
+from config.data_paths import resolve_inventory_path
 from config.settings import PROJECT_ROOT, get_settings
 from database.connectors.wecomm import WecommDatabaseConnector
 from database.tenant import get_tenant_schema, q_ident
@@ -44,12 +45,15 @@ AI_SALES_TABLE = "ai_pos_daily_sales"
 DEFAULT_WAREHOUSE_ID = 1
 DEFAULT_PICKING_LOCATION_ID = 4
 DEFAULT_ADDED_BY = 1
+SKIP_VENDORS = {"UPDATE VENDOR", "BLANK", "NONE", "NAN", ""}
 
 
 def _load_inventory() -> pd.DataFrame:
-    if not INVENTORY_PATH.exists():
-        raise SystemExit(f"missing inventory file: {INVENTORY_PATH}")
-    raw = pd.read_csv(INVENTORY_PATH, dtype=str)
+    path = resolve_inventory_path()
+    if not path.exists():
+        raise SystemExit(f"missing inventory file: {path}")
+    print(f"inventory_file={path.name}")
+    raw = pd.read_csv(path, dtype=str)
     cols = {c.strip().lower(): c for c in raw.columns}
     upc_col = cols.get("upc")
     qty_col = (
@@ -60,6 +64,8 @@ def _load_inventory() -> pd.DataFrame:
     vendor_col = cols.get("vendor_name")
     cost_col = cols.get("cost")
     pack_col = cols.get("pack")
+    desc_col = cols.get("description") or cols.get("productcode")
+    price_col = cols.get("normal_price") or cols.get("price")
     if not upc_col or not qty_col:
         raise SystemExit("inventory CSV needs upc + QuantityOnHand")
 
@@ -73,25 +79,32 @@ def _load_inventory() -> pd.DataFrame:
                 else ""
             ),
             "cost": (
-                pd.to_numeric(raw[cost_col], errors="coerce")
-                if cost_col
-                else pd.NA
+                pd.to_numeric(raw[cost_col], errors="coerce") if cost_col else pd.NA
             ),
             "pack": (
-                pd.to_numeric(raw[pack_col], errors="coerce")
-                if pack_col
-                else pd.NA
+                pd.to_numeric(raw[pack_col], errors="coerce") if pack_col else pd.NA
+            ),
+            "description": (
+                raw[desc_col].fillna("").astype(str).str.strip() if desc_col else ""
+            ),
+            "sell_price": (
+                pd.to_numeric(raw[price_col], errors="coerce") if price_col else pd.NA
             ),
         }
     )
     out = out[out["upc"] != ""]
-    # drop blank / placeholder vendors for vendor table, keep for stock
     return out.reset_index(drop=True)
 
 
 def _norm_vendor_name(name: str) -> str:
-    s = re.sub(r"\s+", " ", (name or "").strip())
-    return s
+    return re.sub(r"\s+", " ", (name or "").strip())
+
+
+def _slugify(name: str, upc: str) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    if not base:
+        base = f"item-{upc}"
+    return f"{base[:80]}-{upc}"[-120:]
 
 
 def _ensure_ai_sales_table(db: WecommDatabaseConnector, sch: str) -> None:
@@ -149,8 +162,7 @@ def import_vendors(
         {
             _norm_vendor_name(n)
             for n in inv["vendor_name"].tolist()
-            if _norm_vendor_name(n)
-            and _norm_vendor_name(n).upper() not in {"UPDATE VENDOR", "BLANK", "NONE", "NAN"}
+            if _norm_vendor_name(n).upper() not in SKIP_VENDORS
         }
     )
     existing = _existing_vendors(db, sch)
@@ -176,13 +188,139 @@ def import_vendors(
                 ).first()
                 existing[key] = int(row[0])
         else:
-            existing[key] = -1  # placeholder for dry-run mapping counts
+            existing[key] = -1
         created += 1
 
     print(f"vendors to_create={created} (execute={execute})")
     if execute:
         existing = _existing_vendors(db, sch)
     return existing
+
+
+def ensure_products_and_barcodes(
+    db: WecommDatabaseConnector,
+    sch: str,
+    inv: pd.DataFrame,
+    upc_map: dict[str, str],
+    *,
+    execute: bool,
+) -> dict[str, str]:
+    """Create products + barcodes for inventory UPCs missing from Paul."""
+    # one row per upc (prefer row with vendor + highest qty)
+    ranked = inv.copy()
+    ranked["_has_vendor"] = ranked["vendor_name"].map(
+        lambda n: _norm_vendor_name(str(n)).upper() not in SKIP_VENDORS
+    )
+    ranked = ranked.sort_values(
+        ["_has_vendor", "quantity"], ascending=[False, False]
+    ).drop_duplicates(subset=["upc"])
+
+    missing = ranked[~ranked["upc"].isin(upc_map.keys())]
+    print(f"new_products_needed={len(missing)} (unmatched UPCs in inventory)")
+    if missing.empty:
+        return upc_map
+
+    if not execute:
+        print("[dry-run] would INSERT products + product_barcodes for missing UPCs")
+        for r in missing.head(10).itertuples(index=False):
+            print(f"  + {r.upc} | {str(r.description)[:50]}")
+        if len(missing) > 10:
+            print(f"  ... +{len(missing) - 10} more")
+        return upc_map
+
+    created = 0
+    with db.engine.begin() as conn:
+        for r in missing.itertuples(index=False):
+            upc = str(r.upc)
+            name = (str(r.description).strip() if r.description else "") or f"UPC {upc}"
+            name = name[:255]
+            slug = _slugify(name, upc)
+            pack = int(r.pack) if pd.notna(r.pack) and float(r.pack) >= 1 else 1
+            sell = float(r.sell_price) if pd.notna(r.sell_price) else 0.0
+            cost = float(r.cost) if pd.notna(r.cost) else None
+            pid_row = conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {sch}.products (
+                      uuid, name, slug, description, sku,
+                      price, purchase_price, min_reorder_quantity,
+                      backorder_quantity, has_expiration, has_serial,
+                      batch_tracking, scale, disable_discount, is_restricted,
+                      is_active, added_by, created_at, updated_at, warehouse_id
+                    ) VALUES (
+                      :uuid, :name, :slug, :description, :sku,
+                      :price, :purchase_price, :pack,
+                      0, FALSE, FALSE,
+                      FALSE, FALSE, FALSE, FALSE,
+                      TRUE, :added, NOW(), NOW(), :wh
+                    )
+                    RETURNING id
+                    """
+                ),
+                {
+                    "uuid": str(uuid.uuid4()),
+                    "name": name,
+                    "slug": slug,
+                    "description": name,
+                    "sku": upc[:64],
+                    "price": sell,
+                    "purchase_price": cost,
+                    "pack": pack,
+                    "added": DEFAULT_ADDED_BY,
+                    "wh": DEFAULT_WAREHOUSE_ID,
+                },
+            ).first()
+            pid = int(pid_row[0])
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {sch}.product_barcodes
+                      (product_id, barcode, type, created_at, updated_at)
+                    VALUES
+                      (:pid, :barcode, 'upc', NOW(), NOW())
+                    """
+                ),
+                {"pid": pid, "barcode": upc},
+            )
+            upc_map[upc] = str(pid)
+            created += 1
+    print(f"created_products={created}")
+    return upc_map
+
+
+def update_existing_packs(
+    db: WecommDatabaseConnector,
+    sch: str,
+    inv: pd.DataFrame,
+    upc_map: dict[str, str],
+    *,
+    execute: bool,
+) -> None:
+    """Refresh min_reorder_quantity from inventory pack when present."""
+    tmp = inv.copy()
+    tmp["product_id"] = tmp["upc"].map(
+        lambda u: int(upc_map[u]) if u in upc_map else pd.NA
+    )
+    tmp = tmp[tmp["product_id"].notna() & tmp["pack"].notna()]
+    tmp["pack"] = pd.to_numeric(tmp["pack"], errors="coerce")
+    tmp = tmp[tmp["pack"] >= 1]
+    tmp = tmp.sort_values("quantity", ascending=False).drop_duplicates("product_id")
+    print(f"pack_updates_candidates={len(tmp)}")
+    if not execute or tmp.empty:
+        return
+    with db.engine.begin() as conn:
+        for r in tmp.itertuples(index=False):
+            conn.execute(
+                text(
+                    f"""
+                    UPDATE {sch}.products
+                    SET min_reorder_quantity = :pack, updated_at = NOW()
+                    WHERE id = :pid AND deleted_at IS NULL
+                    """
+                ),
+                {"pack": int(r.pack), "pid": int(r.product_id)},
+            )
+    print(f"pack_updates_written={len(tmp)}")
 
 
 def _product_vendor_frame(
@@ -198,9 +336,10 @@ def _product_vendor_frame(
         lambda n: _norm_vendor_name(str(n)).lower()
     )
     tmp["vendor_id"] = tmp["vendor_key"].map(
-        lambda k: vendor_map.get(k) if vendor_map.get(k, 0) and vendor_map.get(k, 0) > 0 else pd.NA
+        lambda k: vendor_map.get(k)
+        if vendor_map.get(k, 0) and vendor_map.get(k, 0) > 0
+        else pd.NA
     )
-    # In dry-run, newly staged vendors are -1 — still count by vendor_key presence
     if any(v == -1 for v in vendor_map.values()):
         known = set(vendor_map.keys())
         tmp.loc[
@@ -208,7 +347,7 @@ def _product_vendor_frame(
             "vendor_id",
         ] = -1
 
-    skip = {"update vendor", "blank", "none", "nan", ""}
+    skip = {s.lower() for s in SKIP_VENDORS}
     tmp = tmp[tmp["product_id"].notna() & tmp["vendor_key"].notna()]
     tmp = tmp[~tmp["vendor_key"].isin(skip)]
     tmp = tmp[tmp["vendor_id"].notna()]
@@ -234,11 +373,19 @@ def import_product_vendor(
     print(
         f"product_vendor links={len(uniq)} unmatched_upc_rows={unmatched_upc}"
     )
+    by_vendor = (
+        uniq.groupby("vendor_key").size().sort_values(ascending=False)
+        if not uniq.empty
+        else pd.Series(dtype=int)
+    )
+    print("top vendor catalog sizes:")
+    for k, n in list(by_vendor.head(15).items()):
+        print(f"  {k}: {n}")
+
     if not execute:
         print("[dry-run] would DELETE+INSERT product_vendor")
         return
 
-    # refresh vendor ids after inserts
     vendor_map = _existing_vendors(db, sch)
     uniq = _product_vendor_frame(inv, upc_map, vendor_map)
     uniq = uniq[uniq["vendor_id"] > 0]
@@ -272,7 +419,6 @@ def import_inventory_locations(
     *,
     execute: bool,
 ) -> None:
-    # aggregate qty by upc
     stock = inv.groupby("upc", as_index=False)["quantity"].sum()
     locs = db.read_sql(
         f"""
@@ -306,6 +452,7 @@ def import_inventory_locations(
     unmapped = 0
     pending_inserts: list[tuple[int, float]] = []
     pending_updates: list[tuple[int, float]] = []
+    seen_pids: set[int] = set()
 
     for r in stock.itertuples(index=False):
         pid_s = upc_map.get(r.upc)
@@ -313,6 +460,7 @@ def import_inventory_locations(
             unmapped += 1
             continue
         pid = int(pid_s)
+        seen_pids.add(pid)
         qty = float(r.quantity)
         lid = pid_to_loc.get(pid)
         if lid is None:
@@ -322,14 +470,31 @@ def import_inventory_locations(
             pending_updates.append((lid, qty))
             updates += 1
 
+    # zero picking stock for products not in this inventory dump
+    zero_lids = [
+        lid for pid, lid in pid_to_loc.items() if pid not in seen_pids
+    ]
+
     print(
-        f"inventory update_locs={updates} insert_locs={inserts} unmapped_upc={unmapped}"
+        f"inventory update_locs={updates} insert_locs={inserts} "
+        f"zero_other={len(zero_lids)} unmapped_upc={unmapped}"
     )
     if not execute:
         print("[dry-run] no product_locations written")
         return
 
     with db.engine.begin() as conn:
+        for lid in zero_lids:
+            conn.execute(
+                text(
+                    f"""
+                    UPDATE {sch}.product_locations
+                    SET quantity = 0, updated_at = NOW()
+                    WHERE id = :lid
+                    """
+                ),
+                {"lid": lid},
+            )
         for lid, qty in pending_updates:
             conn.execute(
                 text(
@@ -366,7 +531,7 @@ def import_inventory_locations(
                     "added": DEFAULT_ADDED_BY,
                 },
             )
-    print(f"wrote inventory updates={updates} inserts={inserts}")
+    print(f"wrote inventory updates={updates} inserts={inserts} zeros={len(zero_lids)}")
 
 
 def import_sales(
@@ -381,7 +546,10 @@ def import_sales(
     print(
         f"local_sales rows={len(sales)} "
         f"days={sales['sale_date'].nunique() if not sales.empty else 0} "
-        f"upcs={sales['upc'].nunique() if not sales.empty else 0}"
+        f"upcs={sales['upc'].nunique() if not sales.empty else 0} "
+        f"date_span="
+        f"{sales['sale_date'].min() if not sales.empty else None} -> "
+        f"{sales['sale_date'].max() if not sales.empty else None}"
     )
     if sales.empty:
         return
@@ -443,14 +611,28 @@ def main() -> int:
 
     before = {
         t: int(db.read_sql(f"SELECT COUNT(*) AS n FROM {sch}.{t}").iloc[0]["n"])
-        for t in ("vendors", "product_vendor", "product_locations")
+        for t in ("vendors", "product_vendor", "product_locations", "products", "product_barcodes")
     }
     print("BEFORE", before)
 
     inv = _load_inventory()
-    print(f"inventory_rows={len(inv)}")
+    print(
+        f"inventory_rows={len(inv)} distinct_upc={inv['upc'].nunique()} "
+        f"vendors_in_file={inv['vendor_name'].map(_norm_vendor_name).nunique()}"
+    )
     upc_map = load_upc_to_product_id(schema=schema, connector=db)
     print(f"barcode_map_size={len(upc_map)}")
+
+    # 1) create missing products so vendor catalog can include new UPCs
+    upc_map = ensure_products_and_barcodes(
+        db, sch, inv, upc_map, execute=args.execute
+    )
+    if args.execute:
+        upc_map = load_upc_to_product_id(schema=schema, connector=db)
+        print(f"barcode_map_size_after_products={len(upc_map)}")
+        update_existing_packs(db, sch, inv, upc_map, execute=True)
+    else:
+        update_existing_packs(db, sch, inv, upc_map, execute=False)
 
     vendor_map: dict[str, int] = _existing_vendors(db, sch)
     if not args.skip_vendors:
@@ -470,25 +652,44 @@ def main() -> int:
     if args.execute:
         after = {
             t: int(db.read_sql(f"SELECT COUNT(*) AS n FROM {sch}.{t}").iloc[0]["n"])
-            for t in ("vendors", "product_vendor", "product_locations")
+            for t in (
+                "vendors",
+                "product_vendor",
+                "product_locations",
+                "products",
+                "product_barcodes",
+            )
         }
         try:
-            after[AI_SALES_TABLE] = int(
-                db.read_sql(f"SELECT COUNT(*) AS n FROM {sch}.{AI_SALES_TABLE}").iloc[0][
-                    "n"
-                ]
-            )
+            sales_stats = db.read_sql(
+                f"""
+                SELECT COUNT(*) AS n,
+                       MIN(sale_date) AS min_d,
+                       MAX(sale_date) AS max_d
+                FROM {sch}.{AI_SALES_TABLE}
+                """
+            ).iloc[0]
+            after[AI_SALES_TABLE] = int(sales_stats["n"])
+            print(f"sales_span {sales_stats['min_d']} -> {sales_stats['max_d']}")
         except Exception:
             after[AI_SALES_TABLE] = 0
         print("AFTER", after)
         print("sample vendors:")
         print(
             db.read_sql(
-                f"SELECT id, name FROM {sch}.vendors WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 10"
+                f"""
+                SELECT v.id, v.name, COUNT(pv.product_id) AS catalog_skus
+                FROM {sch}.vendors v
+                LEFT JOIN {sch}.product_vendor pv ON pv.vendor_id = v.id
+                WHERE v.deleted_at IS NULL
+                GROUP BY v.id, v.name
+                ORDER BY catalog_skus DESC
+                LIMIT 15
+                """
             ).to_string(index=False)
         )
 
-    print("DONE — live POS orders untouched; gift_cards skipped (codes mangled in CSV).")
+    print("DONE — live POS orders untouched; gift_cards skipped.")
     return 0
 
 
