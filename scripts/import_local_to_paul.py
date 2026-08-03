@@ -392,6 +392,21 @@ def import_product_vendor(
     print(f"product_vendor inserting={len(uniq)} (clear old links first)")
 
     with db.engine.begin() as conn:
+        # Child history rows block DELETE on product_vendor (FK).
+        hist = conn.execute(
+            text(
+                """
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = :schema
+                  AND table_name = 'product_vendor_histories'
+                LIMIT 1
+                """
+            ),
+            {"schema": sch.strip('"')},
+        ).fetchone()
+        if hist:
+            conn.execute(text(f"DELETE FROM {sch}.product_vendor_histories"))
         conn.execute(text(f"DELETE FROM {sch}.product_vendor"))
         for r in uniq.itertuples(index=False):
             conn.execute(
@@ -411,6 +426,60 @@ def import_product_vendor(
             )
 
 
+def _resolve_warehouse_ids(
+    db: WecommDatabaseConnector, sch: str, *, execute: bool
+) -> tuple[int, int]:
+    """Pick (or create) warehouse_id + warehouse_location_id for stock inserts."""
+    wh_df = db.read_sql(f"SELECT id FROM {sch}.warehouses ORDER BY id LIMIT 1")
+    if wh_df.empty:
+        if not execute:
+            return DEFAULT_WAREHOUSE_ID, DEFAULT_PICKING_LOCATION_ID
+        with db.engine.begin() as conn:
+            wh_id = int(
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO {sch}.warehouses (name, created_at, updated_at)
+                        VALUES ('Main', NOW(), NOW())
+                        RETURNING id
+                        """
+                    )
+                ).scalar_one()
+            )
+    else:
+        wh_id = int(wh_df.iloc[0]["id"])
+
+    loc_df = db.read_sql(
+        f"""
+        SELECT id FROM {sch}.warehouse_locations
+        WHERE warehouse_id = {wh_id}
+        ORDER BY id
+        LIMIT 1
+        """
+    )
+    if loc_df.empty:
+        if not execute:
+            return wh_id, DEFAULT_PICKING_LOCATION_ID
+        with db.engine.begin() as conn:
+            wloc_id = int(
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO {sch}.warehouse_locations
+                          (warehouse_id, name, created_at, updated_at)
+                        VALUES (:wh, 'PICKING', NOW(), NOW())
+                        RETURNING id
+                        """
+                    ),
+                    {"wh": wh_id},
+                ).scalar_one()
+            )
+    else:
+        wloc_id = int(loc_df.iloc[0]["id"])
+    print(f"warehouse_id={wh_id} warehouse_location_id={wloc_id}")
+    return wh_id, wloc_id
+
+
 def import_inventory_locations(
     db: WecommDatabaseConnector,
     sch: str,
@@ -420,6 +489,7 @@ def import_inventory_locations(
     execute: bool,
 ) -> None:
     stock = inv.groupby("upc", as_index=False)["quantity"].sum()
+    wh_id, wloc_id = _resolve_warehouse_ids(db, sch, execute=execute)
     locs = db.read_sql(
         f"""
         SELECT id, product_id
@@ -526,8 +596,8 @@ def import_inventory_locations(
                 {
                     "qty": qty,
                     "pid": pid,
-                    "wh": DEFAULT_WAREHOUSE_ID,
-                    "wloc": DEFAULT_PICKING_LOCATION_ID,
+                    "wh": wh_id,
+                    "wloc": wloc_id,
                     "added": DEFAULT_ADDED_BY,
                 },
             )

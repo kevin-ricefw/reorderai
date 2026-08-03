@@ -13,7 +13,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-DEFAULT_API = "http://127.0.0.1:8001"
+DEFAULT_API = "http://74.249.36.238:8000"
 # (connect timeout, read timeout) — detect-order can be slow on cold start
 TIMEOUT = (10, 300)
 
@@ -26,6 +26,359 @@ DEFAULT_TOOLS = [
     "compare_items",
 ]
 
+# Table columns: API field → clear display name (no justification column).
+ORDER_TABLE_COLS: list[tuple[str, str]] = [
+    ("line_action", "Action"),
+    ("urgency", "Urgency"),
+    ("description", "Product"),
+    ("upc", "UPC"),
+    ("available_stock", "On Hand"),
+    ("days_of_supply", "Days of Supply"),
+    ("ads", "ADS (units/day)"),
+    ("reorder_point", "Reorder Point (ROP)"),
+    ("below_reorder_point", "Below ROP"),
+    ("min_on_hand", "Min On Hand"),
+    ("wecomm_max_on_hand", "Max On Hand"),
+    ("desired_stock", "Desired Stock"),
+    ("projected_stock_at_arrival", "Stock at Arrival"),
+    ("qty_to_order", "Qty to Order"),
+    ("cases_to_order", "Cases to Order"),
+    ("cover_demand_ads", "Cover Demand (C)"),
+    ("lead_demand_ads", "Lead Demand (L)"),
+    ("safety_stock", "SS(L)"),
+    ("safety_stock_cover", "SS(C)"),
+    ("ads_cover_qty", "ADS Cover Qty"),
+    ("ai_target_qty", "AI Cover Target"),
+    ("uplift_multiplier", "Uplift ×"),
+    ("last_pallet_qty", "Last Invoice Qty"),
+    ("demand_class", "Demand Class"),
+]
+
+
+def order_items_dataframe(items: list[dict[str, Any]], *, x_days: int | None = None) -> pd.DataFrame:
+    """Build display table with clean column names; omit justification."""
+    df = pd.DataFrame(items)
+    if df.empty:
+        return df
+    keep = [src for src, _ in ORDER_TABLE_COLS if src in df.columns]
+    out = df[keep].rename(columns={src: label for src, label in ORDER_TABLE_COLS if src in keep})
+    if x_days is not None and x_days > 0:
+        # Make X concrete in headers, e.g. "for 17 days"
+        x_label = f"for {int(x_days)} days"
+        out = out.rename(
+            columns={
+                "ADS Cover Qty (for X days)": f"ADS Cover Qty ({x_label})",
+                "P50 Demand (for X days)": f"P50 Demand ({x_label})",
+                "P90 Demand (for X days)": f"P90 Demand ({x_label})",
+                "AI Target Qty (for X days)": f"AI Target Qty ({x_label})",
+            }
+        )
+    return out
+
+
+def _num(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def item_math_explain_table(
+    it: dict[str, Any],
+    *,
+    lead: int,
+    cover: int,
+    x_days: int,
+) -> pd.DataFrame:
+    """One row per order-table field: value + plain-English meaning + formula."""
+    on_hand = _num(it.get("available_stock"))
+    ads = _num(it.get("ads"))
+    lead_ads = _num(it.get("lead_demand_ads"))
+    cover_ads = _num(it.get("cover_demand_ads"))
+    ss_l = _num(it.get("safety_stock"))
+    ads_cover = _num(it.get("ads_cover_qty"))
+    ss_c = _num(it.get("safety_stock_cover"))
+    if ss_c <= 0:
+        # older API without safety_stock_cover: back out from ADS cover
+        ss_c = max(0.0, round(ads_cover - cover_ads, 4))
+    rop = _num(it.get("reorder_point"))
+    below = bool(it.get("below_reorder_point"))
+    min_oh = _num(it.get("min_on_hand"))
+    min_src = str(it.get("min_on_hand_source") or "none")
+    max_oh = _num(it.get("wecomm_max_on_hand"))
+    below_min = bool(it.get("below_min_on_hand"))
+    desired = _num(it.get("desired_stock"))
+    if desired <= 0:
+        desired = max(_num(it.get("ai_target_qty")), min_oh)
+    uplift = _num(it.get("uplift_multiplier"), 1.0)
+    uplift_rule = it.get("uplift_rule") or "none"
+    p50 = _num(it.get("p50_demand"))
+    p90 = _num(it.get("p90_demand"))
+    target = _num(it.get("ai_target_qty"))
+    at_arrival = _num(it.get("projected_stock_at_arrival"))
+    raw = _num(it.get("raw_qty_to_order"))
+    qty = _num(it.get("qty_to_order"))
+    cases = _num(it.get("cases_to_order"))
+    pack = max(int(_num(it.get("box_qty"), 1)), 1)
+    dclass = it.get("demand_class") or "—"
+    last_inv = it.get("last_pallet_qty")
+    upc = it.get("upc") or "—"
+    name = str(it.get("description") or it.get("item_id") or "Item")
+    model_note = {
+        "smooth": "LightGBM (steady daily sales)",
+        "intermittent": "Croston-SBA (sparse / stop-start sales)",
+        "lumpy": "TSB (uneven spikes)",
+        "erratic": "TSB (high variance)",
+        "single_demand_day": "simple rule (almost no history)",
+    }.get(str(dclass).lower(), "nightly forecast model for this demand class")
+    uplifted_cover = round(cover_ads * uplift, 4)
+
+    rows = [
+        {
+            "Column": "Product",
+            "Value": name,
+            "What it means": "Item name from the vendor catalog.",
+            "How / where it comes from": "Wecomm products table (linked via product_vendor).",
+        },
+        {
+            "Column": "UPC",
+            "Value": upc,
+            "What it means": "Barcode used to match sales, stock, and forecasts.",
+            "How / where it comes from": "product_barcodes.",
+        },
+        {
+            "Column": "On Hand",
+            "Value": f"{on_hand:g}",
+            "What it means": "Units in stock right now (negatives treated as 0 for ordering).",
+            "How / where it comes from": "product_locations.quantity.",
+        },
+        {
+            "Column": "ADS (units/day)",
+            "Value": f"{ads:g}",
+            "What it means": "Average daily sales speed over the last 90 days.",
+            "How / where it comes from": "Sum of units sold in last 90 days ÷ 90 (POS / ai_pos_daily_sales).",
+        },
+        {
+            "Column": "Lead Demand ADS (L days)",
+            "Value": f"{lead_ads:g}",
+            "What it means": (
+                "Expected sell-through while waiting for the truck. "
+                "Burns from on-hand; NOT added to the PO when OH is already 0."
+            ),
+            "How / where it comes from": f"ADS × L = {ads:g} × {lead}.",
+        },
+        {
+            "Column": "Cover Demand ADS (C days)",
+            "Value": f"{cover_ads:g}",
+            "What it means": "Expected sales after arrival — this is what the order is sized for.",
+            "How / where it comes from": f"ADS × C = {ads:g} × {cover}.",
+        },
+        {
+            "Column": "Safety Stock SS(L) — ROP only",
+            "Value": f"{ss_l:g}",
+            "What it means": (
+                "Lead-time buffer only. Used in ROP. "
+                "Do NOT add this into AI target / order qty."
+            ),
+            "How / where it comes from": f"SS(L) = Z × σ × √L  (Z≈1.65). Here ≈ {ss_l:g}.",
+        },
+        {
+            "Column": "Safety Stock SS(C) — in order",
+            "Value": f"{ss_c:g}",
+            "What it means": (
+                "Cover-period buffer. This IS inside ADS Cover and AI Target. "
+                "Larger than SS(L) because √C > √L."
+            ),
+            "How / where it comes from": f"SS(C) = Z × σ × √C  (C={cover}). Here ≈ {ss_c:g}.",
+        },
+        {
+            "Column": "Reorder Point (ROP)",
+            "Value": f"{rop:g}",
+            "What it means": "Lead-time ‘low stock’ warning line — urgency flag, not the order qty.",
+            "How / where it comes from": f"ROP = ADS×L + SS(L) = {lead_ads:g} + {ss_l:g}.",
+        },
+        {
+            "Column": "Below Reorder Point",
+            "Value": str(below).upper(),
+            "What it means": "TRUE = may stock out during lead. Does not change the cover-C order formula.",
+            "How / where it comes from": f"On hand < ROP → {on_hand:g} < {rop:g}.",
+        },
+        {
+            "Column": "Min On Hand",
+            "Value": f"{min_oh:g}",
+            "What it means": (
+                "Wecomm floor only (if set). ROP is NOT used as min — that caused overstock."
+            ),
+            "How / where it comes from": (
+                f"Source={min_src}. max(products.min_on_hand, location min_quantity)."
+            ),
+        },
+        {
+            "Column": "Max On Hand",
+            "Value": f"{max_oh:g}" if max_oh > 0 else "—",
+            "What it means": "Wecomm cap — stops ordering into overstock.",
+            "How / where it comes from": "product_locations.max_quantity (min positive across locs).",
+        },
+        {
+            "Column": "Below Min On Hand",
+            "Value": str(below_min).upper(),
+            "What it means": "TRUE = current on-hand is under the Wecomm min floor.",
+            "How / where it comes from": f"On hand < Min → {on_hand:g} < {min_oh:g}.",
+        },
+        {
+            "Column": f"ADS Cover Qty (for C={cover} days)",
+            "Value": f"{ads_cover:g}",
+            "What it means": "Cover need with buffer, before festival uplift.",
+            "How / where it comes from": (
+                f"ADS×C + SS(C) = {cover_ads:g} + {ss_c:g} = {ads_cover:g}."
+            ),
+        },
+        {
+            "Column": "Uplift ×",
+            "Value": f"{uplift:g}",
+            "What it means": "Weekend / festival lift on expected cover sales only (not on SS).",
+            "How / where it comes from": f"Learned SKU uplift (rule: {uplift_rule}). 1.0 = no lift.",
+        },
+        {
+            "Column": f"P50 Demand (for {x_days} days)",
+            "Value": f"{p50:g}",
+            "What it means": "ML median for X days — reference only; does not set qty.",
+            "How / where it comes from": (
+                f"Nightly forecast_store (class={dclass} → {model_note}), scaled to X={x_days}."
+            ),
+        },
+        {
+            "Column": f"P90 Demand (for {x_days} days)",
+            "Value": f"{p90:g}",
+            "What it means": "ML high-side for X days — reference only; does not set qty.",
+            "How / where it comes from": (
+                f"Same nightly file as P50 (class={dclass} → {model_note}), scaled to X={x_days}."
+            ),
+        },
+        {
+            "Column": f"AI Target Qty (cover C={cover})",
+            "Value": f"{target:g}",
+            "What it means": "Cover need after arrival (before min floor).",
+            "How / where it comes from": (
+                f"(ADS×C×uplift) + SS(C) = {uplifted_cover:g} + {ss_c:g} = {target:g}."
+            ),
+        },
+        {
+            "Column": "Desired Stock (max cover, min)",
+            "Value": f"{desired:g}",
+            "What it means": "Order-up-to level after arrival = max(AI cover target, Min).",
+            "How / where it comes from": (
+                f"max({target:g}, {min_oh:g}) = {desired:g}."
+            ),
+        },
+        {
+            "Column": "Stock at arrival",
+            "Value": f"{at_arrival:g}",
+            "What it means": "On-hand left when PO arrives after burning lead demand.",
+            "How / where it comes from": (
+                f"max(0, OH − ADS×L) = max(0, {on_hand:g} − {lead_ads:g}) = {at_arrival:g}."
+            ),
+        },
+        {
+            "Column": "Qty to Order",
+            "Value": f"{qty:g}",
+            "What it means": "Final units to buy after pack/case rounding.",
+            "How / where it comes from": (
+                f"raw = max(0, desired − stock at arrival) = "
+                f"max(0, {desired:g} − {at_arrival:g}) = {raw:g}; "
+                f"then case round (≥80% of pack {pack})."
+            ),
+        },
+        {
+            "Column": "Cases to Order",
+            "Value": f"{cases:g}",
+            "What it means": "How many cases that qty represents.",
+            "How / where it comes from": "Qty to order ÷ pack size after case rounding.",
+        },
+        {
+            "Column": "Last Invoice Qty",
+            "Value": f"{last_inv:g}" if last_inv is not None else "—",
+            "What it means": "Reference only — last purchased qty. Does not set the order.",
+            "How / where it comes from": "Vendor PO history or Past Invoices fallback.",
+        },
+        {
+            "Column": "Demand Class",
+            "Value": str(dclass),
+            "What it means": "How sales behave — picks which ML model wrote P50/P90.",
+            "How / where it comes from": f"Syntetos–Boylan class from sales history → {model_note}.",
+        },
+        {
+            "Column": "Window X",
+            "Value": f"{x_days} days (L={lead} + C={cover})",
+            "What it means": (
+                "L = wait/burn; C = order cover. "
+                "Order qty uses C (+ SS(C)); L is for burn + ROP only."
+            ),
+            "How / where it comes from": "Your detect-order inputs: lead_time_days + time_to_cover_days.",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def format_item_math(
+    it: dict[str, Any],
+    *,
+    lead: int,
+    cover: int,
+    x_days: int,
+) -> str:
+    """Short step-by-step summary above the full explanation table."""
+    name = str(it.get("description") or it.get("item_id") or "Item")
+    upc = it.get("upc") or "—"
+    on_hand = _num(it.get("available_stock"))
+    ads = _num(it.get("ads"))
+    lead_ads = _num(it.get("lead_demand_ads"))
+    cover_ads = _num(it.get("cover_demand_ads"))
+    ss_l = _num(it.get("safety_stock"))
+    ss_c = _num(it.get("safety_stock_cover"))
+    if ss_c <= 0:
+        ss_c = max(0.0, round(_num(it.get("ads_cover_qty")) - cover_ads, 4))
+    rop = _num(it.get("reorder_point"))
+    below = bool(it.get("below_reorder_point"))
+    min_oh = _num(it.get("min_on_hand"))
+    min_src = str(it.get("min_on_hand_source") or "none")
+    max_oh = _num(it.get("wecomm_max_on_hand"))
+    below_min = bool(it.get("below_min_on_hand"))
+    desired = _num(it.get("desired_stock"))
+    if desired <= 0:
+        desired = max(_num(it.get("ai_target_qty")), min_oh)
+    ads_cover = _num(it.get("ads_cover_qty"))
+    uplift = _num(it.get("uplift_multiplier"), 1.0)
+    target = _num(it.get("ai_target_qty"))
+    at_arrival = _num(it.get("projected_stock_at_arrival"))
+    raw = _num(it.get("raw_qty_to_order"))
+    qty = _num(it.get("qty_to_order"))
+    cases = _num(it.get("cases_to_order"))
+    pack = max(int(_num(it.get("box_qty"), 1)), 1)
+    dclass = it.get("demand_class") or "—"
+    action = it.get("line_action") or "—"
+    urgency = it.get("urgency") or "—"
+    dos = it.get("days_of_supply")
+    dos_s = f"{dos:g}" if dos is not None else "—"
+    uplifted_cover = round(cover_ads * uplift, 4)
+
+    return f"""### {name}
+**UPC:** `{upc}` · **Demand class:** `{dclass}` · **Action:** `{action}` · **Urgency:** `{urgency}`  
+**X = L({lead})+C({cover}) = {x_days} days** · **Days of supply now:** `{dos_s}`
+
+**ROP = trigger only** (when to care). **Qty = cover after arrival** (what to buy).
+
+**1) ADS** → `{ads:g}` / day  
+**2) ROP (trigger)** → `ADS×L + SS(L)` = `{rop:g}`, below=`{str(below).upper()}`  
+**3) Cover need** → `(ADS×C×uplift)+SS(C)` = `{uplifted_cover:g}+{ss_c:g}` → AI cover `{target:g}`  
+**4) Min / Max (Wecomm)** → min=`{min_oh:g}` (`{min_src}`), max=`{max_oh:g or 'none'}`, below min=`{str(below_min).upper()}`  
+**5) Desired** → `max(cover, min)` then ≤ max → **`{desired:g}`**  
+**6) Stock at arrival** → `max(0, OH−ADS×L)` = **`{at_arrival:g}`**  
+**7) Order** → `desired − at arrival` = raw `{raw:g}` → pack (≥80% of {pack}) → **qty={qty:g}**, **cases={cases:g}**  
+**8) SS split** → SS(L)=`{ss_l:g}` for ROP only; SS(C)=`{ss_c:g}` in cover/order · ADS cover base=`{ads_cover:g}`
+"""
 
 # ── HTTP helpers ─────────────────────────────────────────────────────────────
 
@@ -201,7 +554,11 @@ with tab_order:
 
     opts = st.columns(3)
     with opts[0]:
-        include_zero = st.checkbox("Include zero-order lines", value=False)
+        include_zero = st.checkbox(
+            "Include full catalog (SKIP / already covered)",
+            value=False,
+            help="Default shows ORDER + WATCH only. Turn on to audit every SKU.",
+        )
     with opts[1]:
         gen_just = st.checkbox("Generate justifications (slower)", value=False)
     with opts[2]:
@@ -221,6 +578,7 @@ with tab_order:
             if data is not None:
                 st.session_state.order_result = data
                 st.session_state.chat_log = []
+                st.session_state.pop("math_selected_labels", None)
                 st.success(
                     f"OK — {data.get('order_line_count')} / "
                     f"{data.get('catalog_item_count') or data.get('item_count')} SKUs · "
@@ -247,35 +605,13 @@ with tab_order:
 
         items = result.get("items") or []
         if items:
-            df = pd.DataFrame(items)
-            show_cols = [
-                c
-                for c in [
-                    "description",
-                    "available_stock",
-                    "ads",
-                    "lead_demand_ads",
-                    "cover_demand_ads",
-                    "safety_stock",
-                    "reorder_point",
-                    "below_reorder_point",
-                    "ads_cover_qty",
-                    "uplift_multiplier",
-                    "p50_demand",
-                    "p90_demand",
-                    "ai_target_qty",
-                    "qty_to_order",
-                    "cases_to_order",
-                    "box_qty",
-                    "last_pallet_qty",
-                    "demand_class",
-                    "upc",
-                    "justification",
-                ]
-                if c in df.columns
-            ]
+            x_days = int(result.get("x_days") or (int(lead) + int(cover)))
+            st.caption(
+                f"Columns use window **X = {x_days} days** (L={result.get('lead_time_days', lead)} "
+                f"+ C={result.get('time_to_cover_days', cover)}). Justification is not shown in the table."
+            )
             st.dataframe(
-                df[show_cols],
+                order_items_dataframe(items, x_days=x_days),
                 use_container_width=True,
                 hide_index=True,
                 height=480,
@@ -294,31 +630,90 @@ with tab_order:
             except Exception as exc:
                 st.caption(f"Excel download unavailable: {exc}")
 
-            with st.expander("Line detail / justification"):
-                labels = [
-                    f"{it.get('description')} → order {it.get('qty_to_order')}"
-                    for it in items
-                ]
-                pick = st.selectbox("Item", labels, key="detail_pick")
-                it = items[labels.index(pick)]
-                left, right = st.columns(2)
-                with left:
-                    st.json(
-                        {
-                            "item_id": it.get("item_id"),
-                            "upc": it.get("upc"),
-                            "available_stock": it.get("available_stock"),
-                            "p50_demand": it.get("p50_demand"),
-                            "p90_demand": it.get("p90_demand"),
-                            "qty_to_order": it.get("qty_to_order"),
-                            "last_pallet_qty": it.get("last_pallet_qty"),
-                            "box_qty": it.get("box_qty"),
-                            "expiry_capped": it.get("expiry_capped"),
-                        }
-                    )
-                with right:
-                    st.markdown("**Justification**")
-                    st.write(it.get("justification") or "_none_")
+            st.divider()
+            st.subheader("Item math (step-by-step)")
+            st.write(
+                "Select one or more products, then click **Show math** to see the full "
+                "calculation for each row (ADS → ROP → AI target → qty)."
+            )
+
+            # Prefer order lines first in the picker
+            ordered = sorted(
+                items,
+                key=lambda x: (
+                    0 if _num(x.get("qty_to_order")) > 0 else 1,
+                    str(x.get("description") or ""),
+                ),
+            )
+            label_to_item: dict[str, dict[str, Any]] = {}
+            for it in ordered:
+                label = (
+                    f"{it.get('description')}  |  on-hand={_num(it.get('available_stock')):g}  |  "
+                    f"order={_num(it.get('qty_to_order')):g}"
+                )
+                # uniquify if duplicate names
+                base = label
+                n = 2
+                while label in label_to_item:
+                    label = f"{base} ({n})"
+                    n += 1
+                label_to_item[label] = it
+
+            picked = st.multiselect(
+                "Select items",
+                options=list(label_to_item.keys()),
+                default=[],
+                key="math_item_pick",
+                help="Pick products from this run to inspect their math.",
+            )
+            show_math = st.button(
+                "Show math for selected items",
+                type="primary",
+                key="show_item_math",
+                use_container_width=True,
+            )
+            if show_math:
+                if not picked:
+                    st.warning("Select at least one item first.")
+                else:
+                    st.session_state["math_selected_labels"] = list(picked)
+
+            # Persist last selection after click
+            labels_to_show = st.session_state.get("math_selected_labels") or []
+            # Keep in sync if user changes multiselect and clicks again
+            if show_math and picked:
+                labels_to_show = list(picked)
+
+            L_run = int(result.get("lead_time_days") or lead)
+            C_run = int(result.get("time_to_cover_days") or cover)
+
+            if labels_to_show:
+                st.caption(
+                    f"Showing math for {len(labels_to_show)} item(s) · X = {x_days} days. "
+                    "The table below explains **every order-sheet column** (value + meaning + source)."
+                )
+                for lab in labels_to_show:
+                    it = label_to_item.get(lab)
+                    if it is None:
+                        continue
+                    with st.container(border=True):
+                        st.markdown(
+                            format_item_math(
+                                it, lead=L_run, cover=C_run, x_days=x_days
+                            )
+                        )
+                        st.markdown("#### Full column explanation (same fields as the order table)")
+                        st.dataframe(
+                            item_math_explain_table(
+                                it, lead=L_run, cover=C_run, x_days=x_days
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                            height=560,
+                        )
+                        if it.get("justification"):
+                            with st.expander("Justification text"):
+                                st.write(it.get("justification"))
         else:
             st.warning("No order lines in this response.")
 
@@ -422,7 +817,11 @@ with tab_run:
             )
             items = data.get("items") or []
             if items:
-                st.dataframe(pd.DataFrame(items), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    order_items_dataframe(items, x_days=int(data.get("x_days") or 0) or None),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 
 # ── Tab 4: Tools ─────────────────────────────────────────────────────────────
@@ -439,10 +838,10 @@ with tab_tools:
         st.dataframe(pd.DataFrame(data.get("tools") or []), use_container_width=True, hide_index=True)
     st.markdown(
         """
-**Demo flow for TL**
+**Demo flow**
 1. Sidebar → confirm Health + DB  
 2. **Detect order** → Load vendors → pick vendor → set L / C → Run  
-3. Review order table (`last_pallet_qty`, P50/P90, qty)  
+3. Review order table (ADS, P50/P90 for X, AI target, qty)  
 4. **Chatbot** → ask why / expiry / summary on that `run_id`  
 5. **Saved run** → reload any past `run_id`
 """

@@ -114,6 +114,7 @@ class DetectOrderRepository:
               pv.lead_time_days,
               COALESCE(pv.price, p.purchase_price, p.price) AS vendor_price,
               COALESCE(p.min_reorder_quantity, 1) AS box_qty,
+              COALESCE(p.min_on_hand, 0) AS product_min_on_hand,
               (
                 SELECT pb.barcode
                 FROM {sch}.product_barcodes pb
@@ -145,6 +146,7 @@ class DetectOrderRepository:
                   NULL::integer AS lead_time_days,
                   COALESCE(p.purchase_price, p.price) AS vendor_price,
                   COALESCE(p.min_reorder_quantity, 1) AS box_qty,
+                  COALESCE(p.min_on_hand, 0) AS product_min_on_hand,
                   (
                     SELECT pb.barcode
                     FROM {sch}.product_barcodes pb
@@ -159,7 +161,7 @@ class DetectOrderRepository:
                   AND vop.deleted_at IS NULL
                   AND p.deleted_at IS NULL
                 GROUP BY p.id, p.sku, p.name, vo.vendor_id, p.purchase_price, p.price,
-                         p.min_reorder_quantity
+                         p.min_reorder_quantity, p.min_on_hand
                 ORDER BY p.name
                 """,
                 {"vendor_id": vid},
@@ -168,10 +170,16 @@ class DetectOrderRepository:
         item_ids = [int(x) for x in df["item_id"].tolist()] if not df.empty else []
         expiry_map = self._fetch_expiration_days(item_ids)
         pallet_map = self._fetch_last_pallet_qty(item_ids, vid)
+        loc_min_map = self._fetch_location_min_quantity(item_ids)
+        loc_max_map = self._fetch_location_max_quantity(item_ids)
 
         items: list[dict[str, Any]] = []
         for r in df.itertuples(index=False):
             iid = str(int(r.item_id))
+            product_min = float(r.product_min_on_hand or 0)
+            location_min = float(loc_min_map.get(iid, 0.0))
+            wecomm_min = max(product_min, location_min)
+            wecomm_max = float(loc_max_map.get(iid, 0.0))
             items.append(
                 {
                     "item_id": iid,
@@ -187,6 +195,8 @@ class DetectOrderRepository:
                     if r.lead_time_days is not None
                     else None,
                     "catalog_source": source,
+                    "wecomm_min_on_hand": wecomm_min if wecomm_min > 0 else 0.0,
+                    "wecomm_max_on_hand": wecomm_max if wecomm_max > 0 else 0.0,
                 }
             )
 
@@ -338,6 +348,56 @@ class DetectOrderRepository:
         found = {str(int(r.product_id)): float(r.qty) for r in df.itertuples(index=False)}
         return {i: float(found.get(i, 0.0)) for i in item_ids}
 
+    def _fetch_location_min_quantity(self, item_ids: list[int]) -> dict[str, float]:
+        """Max location min_quantity per product (Wecomm shelf/warehouse min)."""
+        if not item_ids:
+            return {}
+        sch = q_ident(self.schema)
+        id_csv = ",".join(str(i) for i in item_ids)
+        try:
+            df = self._conn().read_sql(
+                f"""
+                SELECT product_id, COALESCE(MAX(min_quantity), 0) AS min_qty
+                FROM {sch}.product_locations
+                WHERE deleted_at IS NULL
+                  AND product_id IN ({id_csv})
+                GROUP BY product_id
+                """
+            )
+        except Exception:
+            return {}
+        return {
+            str(int(r.product_id)): float(r.min_qty)
+            for r in df.itertuples(index=False)
+            if r.min_qty is not None and float(r.min_qty) > 0
+        }
+
+    def _fetch_location_max_quantity(self, item_ids: list[int]) -> dict[str, float]:
+        """Min positive location max_quantity per product (anti-overstock cap)."""
+        if not item_ids:
+            return {}
+        sch = q_ident(self.schema)
+        id_csv = ",".join(str(i) for i in item_ids)
+        try:
+            df = self._conn().read_sql(
+                f"""
+                SELECT product_id, MIN(max_quantity) AS max_qty
+                FROM {sch}.product_locations
+                WHERE deleted_at IS NULL
+                  AND product_id IN ({id_csv})
+                  AND max_quantity IS NOT NULL
+                  AND max_quantity > 0
+                GROUP BY product_id
+                """
+            )
+        except Exception:
+            return {}
+        return {
+            str(int(r.product_id)): float(r.max_qty)
+            for r in df.itertuples(index=False)
+            if r.max_qty is not None and float(r.max_qty) > 0
+        }
+
     def _stub_items(self, vendor_id: str) -> list[dict[str, Any]]:
         catalog = {
             "V001": [
@@ -351,6 +411,8 @@ class DetectOrderRepository:
                     "box_qty": 25,
                     "expiration_days_remaining": 10,
                     "last_pallet_qty": 50,
+                    "wecomm_min_on_hand": 0.0,
+                    "wecomm_max_on_hand": 0.0,
                 },
                 {
                     "item_id": "I1002",
@@ -362,6 +424,8 @@ class DetectOrderRepository:
                     "box_qty": 20,
                     "expiration_days_remaining": 45,
                     "last_pallet_qty": 40,
+                    "wecomm_min_on_hand": 30.0,
+                    "wecomm_max_on_hand": 80.0,
                 },
             ],
             "V002": [
@@ -375,6 +439,8 @@ class DetectOrderRepository:
                     "box_qty": 12,
                     "expiration_days_remaining": 60,
                     "last_pallet_qty": 48,
+                    "wecomm_min_on_hand": 0.0,
+                    "wecomm_max_on_hand": 0.0,
                 },
             ],
         }

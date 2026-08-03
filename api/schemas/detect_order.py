@@ -21,7 +21,10 @@ class DetectOrderRequest(BaseModel):
     time_to_cover_days: int = Field(ge=0, description="Extra days of cover beyond lead time")
     include_zero_orders: bool = Field(
         default=False,
-        description="If true, include items with qty_to_order == 0 in the response.",
+        description=(
+            "If false (default): return ORDER + WATCH lines only (actionable list). "
+            "If true: include full catalog including SKIP (dead stock / already covered)."
+        ),
     )
     generate_justification: bool = Field(
         default=False,
@@ -54,31 +57,66 @@ class DetectOrderItem(BaseModel):
     # Demand drivers
     ads: float = Field(0.0, description="Average daily sales")
     demand_std: float = Field(0.0, description="Daily demand std used for safety stock")
-    safety_stock: float = Field(0.0, description="Safety stock for lead time")
-    reorder_point: float = Field(0.0, description="AI minimum / ROP = ADS×L + SS")
+    safety_stock: float = Field(
+        0.0, description="SS(L) — lead-time buffer for ROP only (Z×σ×√L)"
+    )
+    safety_stock_cover: float = Field(
+        0.0, description="SS(C) — cover buffer used in ads_cover / AI target (Z×σ×√C)"
+    )
+    reorder_point: float = Field(
+        0.0, description="ROP trigger = ADS×L + SS(L) — urgency only, not order floor"
+    )
     below_reorder_point: bool = False
+    wecomm_min_on_hand: float = Field(
+        0.0, description="Raw Wecomm min (product min_on_hand / location min_quantity)"
+    )
+    wecomm_max_on_hand: float = Field(
+        0.0, description="Wecomm max_quantity cap (0 = no cap)"
+    )
+    min_on_hand: float = Field(
+        0.0, description="Effective min floor = Wecomm min if > 0, else 0 (no ROP floor)"
+    )
+    min_on_hand_source: str = Field(
+        "none", description="wecomm | none — where min_on_hand came from"
+    )
+    below_min_on_hand: bool = False
+    desired_stock: float = Field(
+        0.0, description="Order-up-to after arrival = max(cover, min), capped by max"
+    )
+    days_of_supply: float | None = Field(
+        None, description="OH / ADS (None if no demand)"
+    )
+    days_of_supply_after_order: float | None = Field(
+        None, description="(stock at arrival + qty) / ADS"
+    )
+    urgency: str = Field(
+        "ok", description="stockout | critical | high | medium | ok | skip"
+    )
+    line_action: str = Field(
+        "SKIP", description="ORDER | WATCH | SKIP — what the buyer should do"
+    )
 
-    # Demand split: lead burn + post-arrival cover → total X = L+C
-    lead_demand_ads: float = Field(0.0, description="ADS × L (sells before truck arrives)")
+    # Lead burn (not ordered) + cover C (order sizes to this)
+    lead_demand_ads: float = Field(0.0, description="ADS × L (burned from on-hand before arrival)")
     lead_demand_p50: float = Field(0.0, description="ML P50 over lead days")
     cover_demand_ads: float = Field(0.0, description="ADS × C (after arrival)")
     cover_demand_p90: float = Field(0.0, description="ML P90 over cover days")
-    ads_cover_qty: float = Field(0.0, description="Classic ADS × X + SS (X=L+C)")
+    ads_cover_qty: float = Field(0.0, description="ADS × C + SS(C) without uplift")
     uplift_multiplier: float = 1.0
     uplift_rule: str | None = None
-    p50_demand: float = Field(0.0, description="ML P50 for full window X=L+C")
-    p90_demand: float = Field(0.0, description="ML P90 for full window X=L+C")
+    p50_demand: float = Field(0.0, description="ML P50 for full window X=L+C (reference)")
+    p90_demand: float = Field(0.0, description="ML P90 for full window X=L+C (reference)")
     ai_target_qty: float = Field(
-        0.0, description="Order-up-to = max(P90_X uplifted, ADS×X + SS)"
+        0.0, description="Cover need after arrival = (ADS×C×uplift) + SS(C)"
     )
 
     horizon_days: int
     forecast_horizon_used: int
     projected_stock_required: float = Field(
-        description="Target on-hand for the planning window (ai_target)"
+        description="Desired stock after arrival = max(ai_target, min_on_hand)"
     )
     projected_stock_at_arrival: float = Field(
-        description="Expected on-hand when order arrives (after lead-time demand)"
+        description="Expected on-hand when order arrives = max(0, OH − ADS×L)"
     )
 
     # Order qty

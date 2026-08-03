@@ -1,0 +1,22 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.idea
+.vscode
+.env
+.env.*
+tests
+docs
+demo_app
+scripts
+data/sales
+data/cache
+data/Past Invoices
+data/**
+!data/forecast_store/
+!data/forecast_store/**
+*.md
+run_demo.bat

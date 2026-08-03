@@ -87,6 +87,14 @@ def forecast_smooth_horizons(
         p50 = float(sum(preds))
         # Normal-ish band on sum of independent-ish residuals
         p90 = p50 + 1.28 * resid_std * np.sqrt(max(h, 1))
+        # LightGBM recursive paths often treat sale-day size as every-day demand.
+        # Rescale to the calendar daily mean (zeros included) when inflated.
+        cal_mean = float(np.mean(hist)) if len(hist) else 0.0
+        pred_mean = p50 / max(h, 1)
+        if cal_mean > 0 and pred_mean > cal_mean * 2.0:
+            scale = (cal_mean * 1.5) / pred_mean
+            p50 *= scale
+            p90 *= scale
         rows.append(
             {
                 "item_id": str(item_id),

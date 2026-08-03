@@ -8,6 +8,7 @@ Select vendor + L + C → for each SKU:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from api.repositories.detect_order_repository import DetectOrderRepository
@@ -22,6 +23,13 @@ from api.services.order_run_store import new_run_id, save_order_run
 from api.services.reorder_engine import compute_line_reorder
 
 
+def _ads_lookback_days() -> float:
+    try:
+        return max(float(os.getenv("ADS_LOOKBACK_DAYS", "90")), 1.0)
+    except (TypeError, ValueError):
+        return 90.0
+
+
 def _vendors(repo: DetectOrderRepository) -> list[VendorInfo]:
     return [
         VendorInfo(vendor_id=str(v["vendor_id"]), vendor_name=str(v["vendor_name"]))
@@ -31,19 +39,20 @@ def _vendors(repo: DetectOrderRepository) -> list[VendorInfo]:
 
 def _template_justification(item: DetectOrderItem, *, lead: int, cover: int) -> str:
     parts = [
-        f"{item.description}: order {item.qty_to_order:g} units "
-        f"({item.cases_to_order:g} cases × pack {item.box_qty}).",
-        f"Window X = L{lead}+C{cover} = {item.horizon_days}d "
-        f"(lead burn + days to cover after arrival). "
-        f"Case only if need ≥ 80% of pack.",
-        f"ADS={item.ads:g}/day; during lead ≈{item.lead_demand_ads:g} units; "
-        f"cover ≈{item.cover_demand_ads:g} units; "
-        f"safety/ROP={item.safety_stock:g}/{item.reorder_point:g}"
-        f"{' [BELOW ROP]' if item.below_reorder_point else ''}.",
-        f"Full-window ADS+SS={item.ads_cover_qty:g}; ML P50={item.p50_demand:g}, "
-        f"P90={item.p90_demand:g} (uplift×{item.uplift_multiplier:g}"
-        f"{f', {item.uplift_rule}' if item.uplift_rule else ''}).",
-        f"AI target={item.ai_target_qty:g}; on-hand={item.available_stock:g}; "
+        f"{item.description}: [{item.line_action}/{item.urgency}] "
+        f"order {item.qty_to_order:g} units ({item.cases_to_order:g} cases × pack {item.box_qty}).",
+        f"L{lead}+C{cover} (X={item.horizon_days}d): ROP triggers urgency; "
+        f"qty covers C after arrival (≥80% case fill).",
+        f"ADS={item.ads:g}/day; DOS≈{item.days_of_supply}; "
+        f"lead burn ≈{item.lead_demand_ads:g}; cover ≈{item.cover_demand_ads:g}; "
+        f"ROP={item.reorder_point:g}"
+        f"{' [BELOW ROP]' if item.below_reorder_point else ''}; "
+        f"Min={item.min_on_hand:g} ({item.min_on_hand_source})"
+        f"{' [BELOW MIN]' if item.below_min_on_hand else ''}"
+        f"{f'; Max={item.wecomm_max_on_hand:g}' if item.wecomm_max_on_hand else ''}.",
+        f"Cover=(ADS×C×uplift)+SS(C)→{item.ai_target_qty:g}; "
+        f"desired={item.desired_stock:g}; "
+        f"OH={item.available_stock:g}; at arrival≈{item.projected_stock_at_arrival:g}; "
         f"raw need={item.raw_qty_to_order:g}.",
     ]
     if item.last_pallet_qty is not None:
@@ -176,6 +185,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
     for it in raw_items:
         item_id = str(it["item_id"])
         raw_on_hand = float(available_map.get(item_id, 0.0))
+        oversold = max(0.0, -raw_on_hand)
         available = max(0.0, raw_on_hand)
         box_qty = max(int(it.get("box_qty") or 1), 1)
         exp_days = it.get("expiration_days_remaining")
@@ -206,6 +216,11 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         if demand_std <= 0 and ads > 0:
             demand_std = ads * 0.3
 
+        # Negative OH: count oversell as sold for ADS on this request; stock = 0.
+        # Do not add |negative| onto the PO qty.
+        if oversold > 0:
+            ads = ads + oversold / _ads_lookback_days()
+
         p50_full = float(fc["p50"])
         p90_full = float(fc["p90"])
         stored_h = int(fc["horizon_days"])
@@ -213,13 +228,13 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         uplift_rule = fc.get("uplift_rule")
 
         notes: list[str] = []
-        if raw_on_hand < 0:
+        if oversold > 0:
             notes.append(
-                f"On-hand was {raw_on_hand:g}; treated as 0 for ordering "
-                f"(negative = sales against unposted receipt)."
+                f"On-hand was {raw_on_hand:g}; {oversold:g} counted as sold for ADS, "
+                f"stock treated as 0 for ordering (not added to PO). Cover C only."
             )
 
-        # Order qty = demand over full window X = L+C (sells during lead + cover after).
+        # Order sizes to cover C after arrival; OH burns during L.
         effective_days = float(x_days)
         expiry_capped = False
         if exp_days_f is not None and effective_days > 0 and exp_days_f < effective_days:
@@ -229,6 +244,9 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
                 f"Window capped to {effective_days:g}d by expiration "
                 f"(requested X={x_days}d = L{lead}+C{cover})."
             )
+
+        wecomm_min = float(it.get("wecomm_min_on_hand") or 0.0)
+        wecomm_max = float(it.get("wecomm_max_on_hand") or 0.0)
 
         calc = compute_line_reorder(
             available=available,
@@ -243,19 +261,43 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             box_qty=box_qty,
             effective_days=effective_days,
             uplift_multiplier=uplift_m,
+            wecomm_min_on_hand=wecomm_min,
+            wecomm_max_on_hand=wecomm_max,
         )
+        if calc.get("skip_dead_stock"):
+            notes.append("No recent demand (ADS≈0) — skipped to avoid overstock.")
+        if uplift_m and float(uplift_m) > 1.0:
+            notes.append(
+                f"Cover sales uplift×{float(uplift_m):g}"
+                f"{f' ({uplift_rule})' if uplift_rule else ''}."
+            )
+        if calc.get("min_raised_target"):
+            notes.append(
+                f"Wecomm min {float(calc.get('min_on_hand') or 0):g} raised desired "
+                f"above cover {float(calc.get('ai_target_qty') or 0):g}."
+            )
+        if calc.get("max_capped_target"):
+            notes.append(
+                f"Wecomm max {wecomm_max:g} capped desired (anti-overstock)."
+            )
+        if calc.get("line_action") == "WATCH" and float(calc.get("qty_to_order") or 0) <= 0:
+            notes.append(
+                "WATCH: below ROP/min but order qty is 0 "
+                "(enough at arrival, or need < 80% of a case)."
+            )
 
         qty_box = float(calc["qty_to_order"])
-        # Expiry re-cap after pack round
+        # Expiry re-cap after pack round vs desired stock at arrival
         if expiry_capped and qty_box > 0 and effective_days > 0:
-            max_sellable = float(calc["p90_eff"])
-            if available + qty_box > max_sellable + 1e-6:
+            max_sellable = float(calc["projected_stock_required"])
+            at_arrival = float(calc["projected_stock_at_arrival"])
+            if at_arrival + qty_box > max_sellable + 1e-6:
                 from v2.inventory_math.pack_size import normalize_pack_size, round_up_to_pack
 
                 pack = normalize_pack_size(box_qty)
-                capped_need = max(0.0, max_sellable - available)
+                capped_need = max(0.0, max_sellable - at_arrival)
                 new_qty = float(round_up_to_pack(capped_need, pack))
-                while new_qty > 0 and (available + new_qty) > max_sellable + 1e-6:
+                while new_qty > 0 and (at_arrival + new_qty) > max_sellable + 1e-6:
                     new_qty = max(0.0, new_qty - pack)
                 if new_qty != qty_box:
                     notes.append(f"Expiry re-cap after pack round: {qty_box:g} → {new_qty:g}.")
@@ -280,8 +322,19 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             ads=float(calc["ads"]),
             demand_std=float(calc["demand_std"]),
             safety_stock=float(calc["safety_stock"]),
+            safety_stock_cover=float(calc.get("safety_stock_x") or 0.0),
             reorder_point=float(calc["reorder_point"]),
             below_reorder_point=bool(calc["below_reorder_point"]),
+            wecomm_min_on_hand=float(calc.get("wecomm_min_on_hand") or 0.0),
+            wecomm_max_on_hand=float(calc.get("wecomm_max_on_hand") or 0.0),
+            min_on_hand=float(calc.get("min_on_hand") or 0.0),
+            min_on_hand_source=str(calc.get("min_on_hand_source") or "none"),
+            below_min_on_hand=bool(calc.get("below_min_on_hand")),
+            desired_stock=float(calc.get("desired_stock") or calc["ai_target_qty"]),
+            days_of_supply=calc.get("days_of_supply"),
+            days_of_supply_after_order=calc.get("days_of_supply_after_order"),
+            urgency=str(calc.get("urgency") or "ok"),
+            line_action=str(calc.get("line_action") or "SKIP"),
             lead_demand_ads=float(calc["lead_demand_ads"]),
             lead_demand_p50=float(calc["lead_demand_p50"]),
             cover_demand_ads=float(calc["cover_demand_ads"]),
@@ -310,8 +363,28 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         )
         lines.append(item)
 
+    # Sort: stockout/critical first, then ORDER qty desc, then WATCH
+    _urg_rank = {
+        "stockout": 0,
+        "critical": 1,
+        "high": 2,
+        "medium": 3,
+        "ok": 4,
+        "skip": 5,
+    }
+    lines.sort(
+        key=lambda x: (
+            _urg_rank.get(x.urgency, 9),
+            0 if x.line_action == "ORDER" else 1 if x.line_action == "WATCH" else 2,
+            -x.qty_to_order,
+            x.description or "",
+        )
+    )
+
     order_lines = [x for x in lines if x.qty_to_order > 0]
-    out_items = lines if req.include_zero_orders else order_lines
+    watch_lines = [x for x in lines if x.line_action == "WATCH"]
+    actionable = [x for x in lines if x.line_action in ("ORDER", "WATCH")]
+    out_items = lines if req.include_zero_orders else actionable
     total_units = round(sum(x.qty_to_order for x in order_lines), 2)
     total_cases = round(sum(x.cases_to_order for x in order_lines), 2)
 
@@ -325,7 +398,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         time_to_cover_days=cover,
         x_days=x_days,
         catalog_item_count=len(lines),
-        item_count=len(lines),
+        item_count=len(out_items),
         order_line_count=len(order_lines),
         total_units_to_order=total_units,
         total_cases_to_order=total_cases,
@@ -333,9 +406,10 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         db_mode=repo.mode,  # type: ignore[arg-type]
         forecast_mode=store.mode,  # type: ignore[arg-type]
         message=(
-            f"{vendor_name}: catalog {len(lines)} SKUs → order {len(order_lines)} lines "
-            f"for X={x_days}d (L={lead} lead burn + C={cover} cover; case if need≥80% pack): "
-            f"{total_units:g} units / {total_cases:g} cases. run_id={run_id}"
+            f"{vendor_name}: catalog {len(lines)} → ORDER {len(order_lines)} + "
+            f"WATCH {len(watch_lines)} for X={x_days}d (L={lead}/C={cover}): "
+            f"{total_units:g} units / {total_cases:g} cases. "
+            f"ROP=trigger only; qty=cover C (+ Wecomm min/max). run_id={run_id}"
         ),
     )
 
