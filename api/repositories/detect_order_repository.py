@@ -318,7 +318,8 @@ class DetectOrderRepository:
     def fetch_available_stock(self, item_ids: list[str]) -> dict[str, float]:
         """Step 2 — sum on-hand qty from product_locations (raw; negatives allowed).
 
-        Detect-order floors negatives to 0 when sizing orders (count-lag scenario).
+        Detect-order keeps negatives on the line (oversold). Order math floors at 0
+        and counts |OH| toward sold / ADS.
         """
         if not self.live:
             stock = {

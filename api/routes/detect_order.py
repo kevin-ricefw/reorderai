@@ -32,7 +32,10 @@ def detect_order_get(
     lead_time_days: int = Query(default=5, ge=0),
     time_to_cover_days: int = Query(default=7, ge=0),
     include_zero_orders: bool = Query(default=False),
-    generate_justification: bool = Query(default=False),
+    generate_justification: bool = Query(
+        default=True,
+        description="Ignored — justification always uses the report-style template (no GPT).",
+    ),
 ) -> DetectOrderResponse:
     # sync def → FastAPI runs in threadpool (won't block other requests)
     return detect_order_service.detect_order(

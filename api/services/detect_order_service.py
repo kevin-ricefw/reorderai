@@ -12,7 +12,7 @@ import os
 from typing import Any
 
 from api.repositories.detect_order_repository import DetectOrderRepository
-from api.repositories.forecast_store import ForecastStore, nearest_horizon
+from api.repositories.forecast_store import ForecastStore
 from api.schemas.detect_order import (
     DetectOrderItem,
     DetectOrderRequest,
@@ -21,6 +21,11 @@ from api.schemas.detect_order import (
 )
 from api.services.order_run_store import new_run_id, save_order_run
 from api.services.reorder_engine import compute_line_reorder
+from v2.forecasting.festival_calendar import (
+    format_festivals_for_display,
+    festivals_in_horizon,
+    reorder_as_of_date,
+)
 
 
 def _ads_lookback_days() -> float:
@@ -37,65 +42,100 @@ def _vendors(repo: DetectOrderRepository) -> list[VendorInfo]:
     ]
 
 
-def _template_justification(item: DetectOrderItem, *, lead: int, cover: int) -> str:
-    parts = [
-        f"{item.description}: [{item.line_action}/{item.urgency}] "
-        f"order {item.qty_to_order:g} units ({item.cases_to_order:g} cases × pack {item.box_qty}).",
-        f"L{lead}+C{cover} (X={item.horizon_days}d): ROP triggers urgency; "
-        f"qty covers C after arrival (≥80% case fill).",
-        f"ADS={item.ads:g}/day; DOS≈{item.days_of_supply}; "
-        f"lead burn ≈{item.lead_demand_ads:g}; cover ≈{item.cover_demand_ads:g}; "
-        f"ROP={item.reorder_point:g}"
-        f"{' [BELOW ROP]' if item.below_reorder_point else ''}; "
-        f"Min={item.min_on_hand:g} ({item.min_on_hand_source})"
-        f"{' [BELOW MIN]' if item.below_min_on_hand else ''}"
-        f"{f'; Max={item.wecomm_max_on_hand:g}' if item.wecomm_max_on_hand else ''}.",
-        f"Cover=(ADS×C×uplift)+SS(C)→{item.ai_target_qty:g}; "
-        f"desired={item.desired_stock:g}; "
-        f"OH={item.available_stock:g}; at arrival≈{item.projected_stock_at_arrival:g}; "
-        f"raw need={item.raw_qty_to_order:g}.",
-    ]
-    if item.last_pallet_qty is not None:
-        parts.append(f"Last invoice qty ref={item.last_pallet_qty:g}.")
-    if item.validation_notes:
-        parts.append("Notes: " + "; ".join(item.validation_notes))
-    return " ".join(parts)
-
-
-def _gpt_or_template_justification(
+def _template_justification(
     item: DetectOrderItem,
     *,
     lead: int,
     cover: int,
-    enabled: bool,
+    as_of: str,
 ) -> str:
-    base = _template_justification(item, lead=lead, cover=cover)
-    if not enabled:
-        return base
-    try:
-        from api.services.explain_service import explain_reorder
+    """Report-style why-order text from computed outputs only (no GPT)."""
+    name = item.description or item.item_id
+    parts: list[str] = []
 
-        answer = explain_reorder(
-            "Explain why this order quantity is recommended.",
-            {
-                "description": item.description,
-                "ads": item.ads,
-                "safety_stock": item.safety_stock,
-                "reorder_point": item.reorder_point,
-                "ai_target_qty": item.ai_target_qty,
-                "available_stock": item.available_stock,
-                "p90_demand": item.p90_demand,
-                "uplift_multiplier": item.uplift_multiplier,
-                "qty_to_order": item.qty_to_order,
-                "cases_to_order": item.cases_to_order,
-                "template": base,
-            },
+    if item.line_action == "ORDER":
+        parts.append(
+            f"ORDER: buy {item.qty_to_order:g} units "
+            f"({item.cases_to_order:g} case(s) x pack {item.box_qty}) of {name}."
         )
-        if answer and not answer.lower().startswith("openai unavailable"):
-            return answer
-    except Exception:
-        pass
-    return base
+    elif item.line_action == "WATCH":
+        parts.append(
+            f"WATCH: {name} is below the reorder point, but stock at arrival "
+            f"already covers the next {cover} day(s) — no buy now."
+        )
+    else:
+        parts.append(
+            f"SKIP: {name} — enough stock or no recent demand."
+        )
+
+    if item.below_reorder_point:
+        parts.append(
+            f"Reason: on-hand {item.available_stock:g} is below reorder point "
+            f"{item.reorder_point:g} (may run short during {lead}-day lead time)."
+        )
+    else:
+        parts.append(
+            f"Stock check: on-hand {item.available_stock:g} vs reorder point "
+            f"{item.reorder_point:g} (not below reorder point)."
+        )
+
+    parts.append(
+        f"Cover need after arrival ({cover}d): desired stock {item.desired_stock:g}; "
+        f"expected on hand when truck arrives ~{item.projected_stock_at_arrival:g}; "
+        f"raw need {item.raw_qty_to_order:g}, rounded up to full cases."
+    )
+
+    lookback = int(item.sales_lookback_days or 90)
+    if lookback > 0:
+        sales_bit = (
+            f"Sales report (last {lookback}d): sold on {item.selling_days} day(s), "
+            f"no sale on {item.zero_sales_days} day(s); "
+            f"total {item.total_units_sold:g} units "
+            f"(~{item.avg_units_on_selling_day:g}/selling day; "
+            f"avg daily sales {item.ads:g})"
+        )
+        if item.available_stock < 0:
+            sales_bit += (
+                f"; includes oversold |on-hand|={abs(item.available_stock):g} as sold"
+            )
+        parts.append(sales_bit + ".")
+
+    fest = (item.upcoming_festivals or "").strip()
+    # Split named festivals vs weekend note for clearer wording
+    fest_named = ""
+    weekend_bit = ""
+    if fest:
+        chunks = [c.strip() for c in fest.split(";") if c.strip()]
+        named = [c for c in chunks if not c.lower().startswith("weekend")]
+        weekends = [c for c in chunks if c.lower().startswith("weekend")]
+        fest_named = "; ".join(named)
+        weekend_bit = "; ".join(weekends)
+
+    window_end_note = f"as of {as_of}" if as_of else "as of today"
+    if fest_named:
+        cal = (
+            f"Festivals in next {item.horizon_days} days ({window_end_note}): {fest_named}."
+        )
+    else:
+        cal = (
+            f"Festivals in next {item.horizon_days} days ({window_end_note}): "
+            f"none on the holiday calendar."
+        )
+    if weekend_bit:
+        cal += f" Also {weekend_bit}."
+    if item.festival_uplift_applied and item.uplift_multiplier > 1.0:
+        cal += (
+            f" This item historically spikes — cover raised by x{item.uplift_multiplier:g}"
+            f"{f' ({item.uplift_rule})' if item.uplift_rule else ''}."
+        )
+    elif fest_named or weekend_bit:
+        cal += " No festival uplift applied for this item."
+    parts.append(cal)
+
+    if item.urgency and item.urgency not in ("ok", "skip"):
+        parts.append(f"Urgency: {item.urgency}.")
+
+    return " ".join(parts)
 
 
 def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
@@ -178,7 +218,17 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
     available_map = repo.fetch_available_stock(item_ids)
     # Warm ADS/std once for the whole catalog
     demand_stats = store.get_demand_stats(item_ids)
-    _ = nearest_horizon(x_days)
+
+    as_of = reorder_as_of_date()
+    as_of_s = as_of.isoformat()
+    fest_rows = festivals_in_horizon(x_days, as_of=as_of)
+    upcoming_festivals = format_festivals_for_display(fest_rows)
+    weekend_row = next((r for r in fest_rows if r.get("name") == "weekend"), None)
+    if weekend_row:
+        weekend_note = f"weekends ({weekend_row['days_in_window']}d in window)"
+        upcoming_festivals = (
+            f"{upcoming_festivals}; {weekend_note}" if upcoming_festivals else weekend_note
+        )
 
     lines: list[DetectOrderItem] = []
 
@@ -186,7 +236,8 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         item_id = str(it["item_id"])
         raw_on_hand = float(available_map.get(item_id, 0.0))
         oversold = max(0.0, -raw_on_hand)
-        available = max(0.0, raw_on_hand)
+        # Display keeps the real (possibly negative) OH. Order math floors at 0.
+        available_for_order = max(0.0, raw_on_hand)
         box_qty = max(int(it.get("box_qty") or 1), 1)
         exp_days = it.get("expiration_days_remaining")
         exp_days_f = float(exp_days) if exp_days is not None else None
@@ -206,20 +257,33 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             demand_class = fc.get("demand_class")
 
         st = demand_stats.get(item_id) or {}
-        ads = float(fc.get("ads") if fc.get("ads") is not None else st.get("ads") or 0.0)
+        # Live 90d ADS wins. Never let batch P50 invent a fake daily rate.
+        ads = float(st.get("ads") if st.get("ads") is not None else fc.get("ads") or 0.0)
         demand_std = float(
-            fc.get("demand_std")
-            if fc.get("demand_std") is not None
-            else st.get("demand_std")
+            st.get("demand_std")
+            if st.get("demand_std") is not None
+            else fc.get("demand_std")
             or 0.0
         )
         if demand_std <= 0 and ads > 0:
             demand_std = ads * 0.3
 
-        # Negative OH: count oversell as sold for ADS on this request; stock = 0.
-        # Do not add |negative| onto the PO qty.
+        lookback_days = int(st.get("sales_lookback_days") or _ads_lookback_days())
+        selling_days = int(st.get("selling_days") or 0)
+        total_units_sold = float(st.get("total_units_sold") or 0.0)
+
+        # Negative OH: show the minus in On Hand, but count |OH| as sold for ADS
+        # and the sales report (so totals are not stuck at 0 while ADS rises).
+        # Do not add |negative| onto the PO qty — order from floored stock = 0.
         if oversold > 0:
-            ads = ads + oversold / _ads_lookback_days()
+            ads = ads + oversold / max(float(lookback_days), 1.0)
+            total_units_sold += oversold
+            selling_days = max(selling_days, 1)
+
+        zero_sales_days = max(lookback_days - selling_days, 0)
+        avg_units_on_selling_day = (
+            (total_units_sold / selling_days) if selling_days > 0 else 0.0
+        )
 
         p50_full = float(fc["p50"])
         p90_full = float(fc["p90"])
@@ -230,8 +294,9 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         notes: list[str] = []
         if oversold > 0:
             notes.append(
-                f"On-hand was {raw_on_hand:g}; {oversold:g} counted as sold for ADS, "
-                f"stock treated as 0 for ordering (not added to PO). Cover C only."
+                f"On-hand {raw_on_hand:g} (oversold). "
+                f"{oversold:g} counted as sold in ADS and sales totals; "
+                f"order math uses stock 0 (deficit not added to PO)."
             )
 
         # Order sizes to cover C after arrival; OH burns during L.
@@ -245,11 +310,10 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
                 f"(requested X={x_days}d = L{lead}+C{cover})."
             )
 
-        wecomm_min = float(it.get("wecomm_min_on_hand") or 0.0)
         wecomm_max = float(it.get("wecomm_max_on_hand") or 0.0)
 
         calc = compute_line_reorder(
-            available=available,
+            available=available_for_order,
             ads=ads,
             demand_std=demand_std,
             lead_days=lead,
@@ -261,7 +325,6 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             box_qty=box_qty,
             effective_days=effective_days,
             uplift_multiplier=uplift_m,
-            wecomm_min_on_hand=wecomm_min,
             wecomm_max_on_hand=wecomm_max,
         )
         if calc.get("skip_dead_stock"):
@@ -271,19 +334,19 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
                 f"Cover sales uplift×{float(uplift_m):g}"
                 f"{f' ({uplift_rule})' if uplift_rule else ''}."
             )
-        if calc.get("min_raised_target"):
-            notes.append(
-                f"Wecomm min {float(calc.get('min_on_hand') or 0):g} raised desired "
-                f"above cover {float(calc.get('ai_target_qty') or 0):g}."
-            )
         if calc.get("max_capped_target"):
             notes.append(
                 f"Wecomm max {wecomm_max:g} capped desired (anti-overstock)."
             )
+        if calc.get("box_rounded") and float(calc.get("qty_to_order") or 0) > 0:
+            notes.append(
+                f"Rounded up to full case(s): raw {float(calc.get('raw_qty_to_order') or 0):g} "
+                f"→ {float(calc.get('qty_to_order') or 0):g} units "
+                f"({float(calc.get('cases_to_order') or 0):g} cases)."
+            )
         if calc.get("line_action") == "WATCH" and float(calc.get("qty_to_order") or 0) <= 0:
             notes.append(
-                "WATCH: below ROP/min but order qty is 0 "
-                "(enough at arrival, or need < 80% of a case)."
+                "WATCH: below ROP but cover need is already met at arrival."
             )
 
         qty_box = float(calc["qty_to_order"])
@@ -315,7 +378,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             vendor_id=vendor_id,
             demand_class=str(demand_class) if demand_class else None,
             forecast_source=str(fc.get("source") or ""),
-            available_stock=available,
+            available_stock=raw_on_hand,
             last_pallet_qty=float(last_pallet) if last_pallet is not None else None,
             expiration_days_remaining=exp_days_f,
             box_qty=box_qty,
@@ -340,8 +403,16 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             cover_demand_ads=float(calc["cover_demand_ads"]),
             cover_demand_p90=float(calc["cover_demand_p90"]),
             ads_cover_qty=float(calc["ads_cover_qty"]),
+            ads_times_x=float(calc.get("ads_times_x") or 0.0),
             uplift_multiplier=float(calc["uplift_multiplier"]),
             uplift_rule=str(uplift_rule) if uplift_rule else None,
+            upcoming_festivals=upcoming_festivals,
+            festival_uplift_applied=bool(uplift_m and float(uplift_m) > 1.0),
+            sales_lookback_days=lookback_days,
+            selling_days=selling_days,
+            zero_sales_days=zero_sales_days,
+            total_units_sold=round(total_units_sold, 4),
+            avg_units_on_selling_day=round(avg_units_on_selling_day, 4),
             p50_demand=float(calc["p50_demand"]),
             p90_demand=float(calc["p90_demand"]),
             ai_target_qty=float(calc["ai_target_qty"]),
@@ -358,8 +429,8 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             box_rounded=bool(calc["box_rounded"]),
             validation_notes=notes,
         )
-        item.justification = _gpt_or_template_justification(
-            item, lead=lead, cover=cover, enabled=req.generate_justification
+        item.justification = _template_justification(
+            item, lead=lead, cover=cover, as_of=as_of_s
         )
         lines.append(item)
 
@@ -397,6 +468,8 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         lead_time_days=lead,
         time_to_cover_days=cover,
         x_days=x_days,
+        as_of_date=as_of_s,
+        upcoming_festivals=upcoming_festivals,
         catalog_item_count=len(lines),
         item_count=len(out_items),
         order_line_count=len(order_lines),

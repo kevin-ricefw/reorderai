@@ -1,0 +1,25 @@
+[Unit]
+Description=Reorder AI nightly forecast batch (P50/P90 + SKU uplift)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=azureuser
+Group=azureuser
+WorkingDirectory=/opt/reorder-ai
+Environment=PATH=/opt/reorder-ai/.venv/bin:/usr/bin
+EnvironmentFile=/opt/reorder-ai/.env
+# Live DB sales only on the VM (no laptop Product Sales CSVs)
+Environment=FORECAST_USE_LOCAL_SALES=0
+ExecStartPre=/bin/mkdir -p /var/log/reorder-ai /opt/reorder-ai/data/forecast_store
+ExecStart=/opt/reorder-ai/.venv/bin/python /opt/reorder-ai/scripts/run_nightly_forecast.py
+# Stamp last successful finish (as_of still written by the script into forecast_store)
+ExecStartPost=/bin/bash -c 'date -u +"%%Y-%%m-%%dT%%H:%%M:%%SZ" > /opt/reorder-ai/data/forecast_store/last_success.txt'
+StandardOutput=append:/var/log/reorder-ai/nightly-forecast.log
+StandardError=append:/var/log/reorder-ai/nightly-forecast.log
+Nice=10
+TimeoutStartSec=6h
+
+[Install]
+WantedBy=multi-user.target

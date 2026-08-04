@@ -73,13 +73,21 @@ def fit_tsb(daily: pd.Series, alpha: float = 0.1, beta: float = 0.1) -> Intermit
     return IntermittentParams("tsb", z, p, float(max(z * p, 0.0)))
 
 
-def fit_rule_based(daily: pd.Series) -> IntermittentParams:
-    """Single-demand-day / cold start — no statistical model."""
+def fit_rule_based(
+    daily: pd.Series,
+    *,
+    min_span_days: int = 90,
+) -> IntermittentParams:
+    """Single-demand-day / cold start — no statistical model.
+
+    Spread sparse volume over at least ``min_span_days`` so a 1-day series
+    (one historical sale) is never treated as demand every day (p=1.0).
+    """
     y = pd.to_numeric(daily, errors="coerce").fillna(0.0)
     total = float(y.sum())
-    n = max(int(len(y)), 1)
+    n = max(int(len(y)), int(min_span_days), 1)
     size = float(y[y > 0].iloc[0]) if (y > 0).any() else 0.0
-    # Spread known volume thinly; API can still order conservatively via P90 MC
+    # Spread known volume thinly across a real calendar span
     daily_exp = total / n
-    p = 1.0 / n if total > 0 else 0.0
+    p = (1.0 / n) if total > 0 else 0.0
     return IntermittentParams("rule", size, p, float(daily_exp))

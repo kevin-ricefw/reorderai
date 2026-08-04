@@ -27,8 +27,11 @@ class DetectOrderRequest(BaseModel):
         ),
     )
     generate_justification: bool = Field(
-        default=False,
-        description="Step 6 — attach plain-English GPT/template justification per line.",
+        default=True,
+        description=(
+            "Deprecated / ignored. Justification is always filled from order math "
+            "(report-style template; no GPT)."
+        ),
     )
 
 
@@ -48,7 +51,7 @@ class DetectOrderItem(BaseModel):
     demand_class: str | None = None
     forecast_source: str | None = None
 
-    # Stock
+    # Stock (raw Wecomm OH — negatives kept; order math floors at 0)
     available_stock: float
     last_pallet_qty: float | None = None
     expiration_days_remaining: float | None = None
@@ -102,8 +105,26 @@ class DetectOrderItem(BaseModel):
     cover_demand_ads: float = Field(0.0, description="ADS × C (after arrival)")
     cover_demand_p90: float = Field(0.0, description="ML P90 over cover days")
     ads_cover_qty: float = Field(0.0, description="ADS × C + SS(C) without uplift")
+    ads_times_x: float = Field(
+        0.0,
+        description="Sanity baseline = ADS × X (before SS / uplift / final target)",
+    )
     uplift_multiplier: float = 1.0
     uplift_rule: str | None = None
+    upcoming_festivals: str = Field(
+        "",
+        description="Festival/weekend tags in the next X days from the calendar",
+    )
+    festival_uplift_applied: bool = False
+    sales_lookback_days: int = 90
+    selling_days: int = Field(
+        0, description="Days with sales > 0 in the ADS lookback (e.g. 5 of 90)"
+    )
+    zero_sales_days: int = Field(
+        0, description="Days with no sale in the ADS lookback"
+    )
+    total_units_sold: float = 0.0
+    avg_units_on_selling_day: float = 0.0
     p50_demand: float = Field(0.0, description="ML P50 for full window X=L+C (reference)")
     p90_demand: float = Field(0.0, description="ML P90 for full window X=L+C (reference)")
     ai_target_qty: float = Field(
@@ -141,6 +162,17 @@ class DetectOrderResponse(BaseModel):
     lead_time_days: int = 0
     time_to_cover_days: int = 0
     x_days: int = Field(0, description="Lead Time + Time to Cover")
+    as_of_date: str = Field(
+        "",
+        description=(
+            "Calendar 'today' used for festival/weekend scan "
+            "(API host clock in REORDER_TZ, default America/Detroit — Michigan)"
+        ),
+    )
+    upcoming_festivals: str = Field(
+        "",
+        description="Named festivals in the next X days from as_of_date (shared for the run)",
+    )
     catalog_item_count: int = 0
     item_count: int = 0
     order_line_count: int = 0

@@ -7,9 +7,60 @@ weekends vs festival windows (not a blanket multiplier for every item).
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import os
+from datetime import date, datetime, timedelta
 from functools import lru_cache
-from typing import Iterable
+from typing import Any, Iterable
+
+# Human labels for calendar tags (used in UI / justification).
+FESTIVAL_LABELS: dict[str, str] = {
+    "weekend": "Weekend",
+    "us_new_year": "US New Year",
+    "in_republic_day": "India Republic Day",
+    "us_mlk": "US MLK Day",
+    "us_presidents": "US Presidents Day",
+    "in_holi": "Holi",
+    "in_holi_season": "Holi season",
+    "us_easter": "Easter",
+    "us_memorial": "US Memorial Day",
+    "us_independence": "US Independence Day",
+    "us_july4_week": "US July 4 week",
+    "in_independence": "India Independence Day",
+    "us_labor": "US Labor Day",
+    "in_ganesh": "Ganesh Chaturthi",
+    "in_navratri_diwali": "Navratri / Diwali",
+    "us_thanksgiving": "US Thanksgiving",
+    "us_thanksgiving_season": "US Thanksgiving season",
+    "us_christmas": "Christmas",
+    "us_christmas_season": "Christmas season",
+    "year_end": "Year-end",
+}
+
+
+def festival_label(tag: str) -> str:
+    return FESTIVAL_LABELS.get(tag, tag.replace("_", " ").title())
+
+
+def reorder_as_of_date() -> date:
+    """
+    'Today' for festival / uplift windows.
+
+    Uses the API host clock in REORDER_TZ (default America/Detroit — Michigan),
+    not the browser clock. Override with REORDER_AS_OF=YYYY-MM-DD for demos.
+    """
+    override = (os.getenv("REORDER_AS_OF") or "").strip()
+    if override:
+        try:
+            return date.fromisoformat(override[:10])
+        except ValueError:
+            pass
+    tz_name = (os.getenv("REORDER_TZ") or "America/Detroit").strip()
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo(tz_name)).date()
+    except Exception:
+        return date.today()
 
 
 # Fixed / civil dates by year. Lunar festivals use published approximate dates
@@ -145,3 +196,57 @@ def daterange(start: date, end: date) -> list[date]:
         out.append(cur)
         cur += timedelta(days=1)
     return out
+
+
+def festivals_in_horizon(
+    horizon_days: int,
+    *,
+    as_of: date | None = None,
+) -> list[dict[str, Any]]:
+    """Festivals/holidays (+ weekend count) in [as_of, as_of + horizon)."""
+    start = as_of or reorder_as_of_date()
+    days = max(int(horizon_days), 0)
+    buckets: dict[str, list[date]] = {}
+    weekend_days = 0
+    for i in range(days):
+        d = start + timedelta(days=i)
+        if is_weekend(d):
+            weekend_days += 1
+        for tag in festival_tags_for_date(d):
+            buckets.setdefault(tag, []).append(d)
+    out: list[dict[str, Any]] = []
+    for name, ds in sorted(buckets.items(), key=lambda kv: min(kv[1])):
+        out.append(
+            {
+                "name": name,
+                "label": festival_label(name),
+                "first_date": min(ds).isoformat(),
+                "last_date": max(ds).isoformat(),
+                "days_in_window": len(ds),
+            }
+        )
+    if weekend_days > 0:
+        out.append(
+            {
+                "name": "weekend",
+                "label": festival_label("weekend"),
+                "first_date": start.isoformat(),
+                "last_date": (start + timedelta(days=max(days - 1, 0))).isoformat(),
+                "days_in_window": weekend_days,
+            }
+        )
+    return out
+
+
+def format_festivals_for_display(fest_rows: list[dict[str, Any]]) -> str:
+    """Readable festival list for justification / table (excludes weekend-only row)."""
+    bits: list[str] = []
+    for r in fest_rows:
+        if r.get("name") == "weekend":
+            continue
+        label = r.get("label") or festival_label(str(r.get("name") or ""))
+        first = r.get("first_date") or ""
+        last = r.get("last_date") or first
+        span = first if first == last else f"{first} to {last}"
+        bits.append(f"{label} ({span})")
+    return "; ".join(bits)

@@ -7,6 +7,7 @@ Reorder AI — Streamlit demo (calls the FastAPI endpoints).
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 import pandas as pd
@@ -26,7 +27,7 @@ DEFAULT_TOOLS = [
     "compare_items",
 ]
 
-# Table columns: API field → clear display name (no justification column).
+# Table columns: API field → clear display name.
 ORDER_TABLE_COLS: list[tuple[str, str]] = [
     ("line_action", "Action"),
     ("urgency", "Urgency"),
@@ -34,39 +35,43 @@ ORDER_TABLE_COLS: list[tuple[str, str]] = [
     ("upc", "UPC"),
     ("available_stock", "On Hand"),
     ("days_of_supply", "Days of Supply"),
-    ("ads", "ADS (units/day)"),
+    ("ads", "ADS / day"),
+    ("ads_times_x", "ADS × X"),
+    ("selling_days", "Selling Days"),
+    ("zero_sales_days", "Zero-Sale Days"),
     ("reorder_point", "Reorder Point (ROP)"),
     ("below_reorder_point", "Below ROP"),
-    ("min_on_hand", "Min On Hand"),
-    ("wecomm_max_on_hand", "Max On Hand"),
     ("desired_stock", "Desired Stock"),
     ("projected_stock_at_arrival", "Stock at Arrival"),
     ("qty_to_order", "Qty to Order"),
     ("cases_to_order", "Cases to Order"),
-    ("cover_demand_ads", "Cover Demand (C)"),
+    ("cover_demand_ads", "Cover Demand (X−L)"),
     ("lead_demand_ads", "Lead Demand (L)"),
     ("safety_stock", "SS(L)"),
-    ("safety_stock_cover", "SS(C)"),
-    ("ads_cover_qty", "ADS Cover Qty"),
-    ("ai_target_qty", "AI Cover Target"),
+    ("safety_stock_cover", "SS(X−L)"),
+    ("ads_cover_qty", "ADS Cover (X−L)+SS"),
+    ("ai_target_qty", "AI Target (cover+SS+uplift)"),
     ("uplift_multiplier", "Uplift ×"),
+    ("upcoming_festivals", "Festivals in X"),
     ("last_pallet_qty", "Last Invoice Qty"),
     ("demand_class", "Demand Class"),
+    ("justification", "Justification"),
 ]
 
 
 def order_items_dataframe(items: list[dict[str, Any]], *, x_days: int | None = None) -> pd.DataFrame:
-    """Build display table with clean column names; omit justification."""
+    """Build display table with clean column names."""
     df = pd.DataFrame(items)
     if df.empty:
         return df
     keep = [src for src, _ in ORDER_TABLE_COLS if src in df.columns]
     out = df[keep].rename(columns={src: label for src, label in ORDER_TABLE_COLS if src in keep})
     if x_days is not None and x_days > 0:
-        # Make X concrete in headers, e.g. "for 17 days"
-        x_label = f"for {int(x_days)} days"
+        x_i = int(x_days)
+        x_label = f"for {x_i} days"
         out = out.rename(
             columns={
+                "ADS × X": f"ADS × {x_i}d",
                 "ADS Cover Qty (for X days)": f"ADS Cover Qty ({x_label})",
                 "P50 Demand (for X days)": f"P50 Demand ({x_label})",
                 "P90 Demand (for X days)": f"P90 Demand ({x_label})",
@@ -151,14 +156,52 @@ def item_math_explain_table(
         {
             "Column": "On Hand",
             "Value": f"{on_hand:g}",
-            "What it means": "Units in stock right now (negatives treated as 0 for ordering).",
+            "What it means": (
+                "Units in stock right now (can be negative = oversold). "
+                "Negatives stay visible; |OH| is counted as sold for ADS. "
+                "Order math still floors stock at 0 (deficit not added to PO)."
+            ),
             "How / where it comes from": "product_locations.quantity.",
         },
         {
-            "Column": "ADS (units/day)",
+            "Column": "ADS / day",
             "Value": f"{ads:g}",
             "What it means": "Average daily sales speed over the last 90 days.",
             "How / where it comes from": "Sum of units sold in last 90 days ÷ 90 (POS / ai_pos_daily_sales).",
+        },
+        {
+            "Column": f"ADS × {x_days}d",
+            "Value": f"{_num(it.get('ads_times_x'), ads * x_days):g}",
+            "What it means": (
+                "Sanity baseline — plain ADS×X before safety stock, festival uplift, "
+                "or ML polish. If final qty is wildly different from this, dig in."
+            ),
+            "How / where it comes from": f"ADS × X = {ads:g} × {x_days}.",
+        },
+        {
+            "Column": "Selling / zero-sale days",
+            "Value": (
+                f"{int(_num(it.get('selling_days')))} selling / "
+                f"{int(_num(it.get('zero_sales_days')))} zero "
+                f"(lookback {int(_num(it.get('sales_lookback_days'), 90))}d)"
+            ),
+            "What it means": (
+                "How often the SKU actually sold. Example: 5 selling days and 85 zero days "
+                "means lumpy demand — most days had no sale."
+            ),
+            "How / where it comes from": "Count of POS days with quantity > 0 vs days with no sale in lookback.",
+        },
+        {
+            "Column": "Festivals in X",
+            "Value": str(it.get("upcoming_festivals") or "none / weekends only"),
+            "What it means": (
+                "Named festivals + weekends inside the next X days. "
+                "Raises cover qty only if this SKU has a learned uplift for those tags."
+            ),
+            "How / where it comes from": (
+                f"festival_calendar scan of each day in X={x_days}; "
+                f"SKU uplift ×{uplift:g} (rule: {uplift_rule})."
+            ),
         },
         {
             "Column": "Lead Demand ADS (L days)",
@@ -173,7 +216,9 @@ def item_math_explain_table(
             "Column": "Cover Demand ADS (C days)",
             "Value": f"{cover_ads:g}",
             "What it means": "Expected sales after arrival — this is what the order is sized for.",
-            "How / where it comes from": f"ADS × C = {ads:g} × {cover}.",
+            "How / where it comes from": (
+                f"ceil(ADS × C) = ceil({ads:g} × {cover}) → {cover_ads:g} whole units."
+            ),
         },
         {
             "Column": "Safety Stock SS(L) — ROP only",
@@ -182,7 +227,9 @@ def item_math_explain_table(
                 "Lead-time buffer only. Used in ROP. "
                 "Do NOT add this into AI target / order qty."
             ),
-            "How / where it comes from": f"SS(L) = Z × σ × √L  (Z≈1.65). Here ≈ {ss_l:g}.",
+            "How / where it comes from": (
+                f"SS(L) = Z × σ × √L = 1.65 × {_num(it.get('demand_std')):g} × √{lead} → {ss_l:g}."
+            ),
         },
         {
             "Column": "Safety Stock SS(C) — in order",
@@ -191,13 +238,15 @@ def item_math_explain_table(
                 "Cover-period buffer. This IS inside ADS Cover and AI Target. "
                 "Larger than SS(L) because √C > √L."
             ),
-            "How / where it comes from": f"SS(C) = Z × σ × √C  (C={cover}). Here ≈ {ss_c:g}.",
+            "How / where it comes from": (
+                f"SS(C) = Z × σ × √C = 1.65 × {_num(it.get('demand_std')):g} × √{cover} → {ss_c:g}."
+            ),
         },
         {
             "Column": "Reorder Point (ROP)",
             "Value": f"{rop:g}",
             "What it means": "Lead-time ‘low stock’ warning line — urgency flag, not the order qty.",
-            "How / where it comes from": f"ROP = ADS×L + SS(L) = {lead_ads:g} + {ss_l:g}.",
+            "How / where it comes from": f"ROP = ADS×L + SS(L) = {ads:g}×{lead} + {ss_l:g} → {rop:g}.",
         },
         {
             "Column": "Below Reorder Point",
@@ -206,33 +255,11 @@ def item_math_explain_table(
             "How / where it comes from": f"On hand < ROP → {on_hand:g} < {rop:g}.",
         },
         {
-            "Column": "Min On Hand",
-            "Value": f"{min_oh:g}",
-            "What it means": (
-                "Wecomm floor only (if set). ROP is NOT used as min — that caused overstock."
-            ),
-            "How / where it comes from": (
-                f"Source={min_src}. max(products.min_on_hand, location min_quantity)."
-            ),
-        },
-        {
-            "Column": "Max On Hand",
-            "Value": f"{max_oh:g}" if max_oh > 0 else "—",
-            "What it means": "Wecomm cap — stops ordering into overstock.",
-            "How / where it comes from": "product_locations.max_quantity (min positive across locs).",
-        },
-        {
-            "Column": "Below Min On Hand",
-            "Value": str(below_min).upper(),
-            "What it means": "TRUE = current on-hand is under the Wecomm min floor.",
-            "How / where it comes from": f"On hand < Min → {on_hand:g} < {min_oh:g}.",
-        },
-        {
             "Column": f"ADS Cover Qty (for C={cover} days)",
             "Value": f"{ads_cover:g}",
-            "What it means": "Cover need with buffer, before festival uplift.",
+            "What it means": "Cover need with buffer, before festival uplift (whole units).",
             "How / where it comes from": (
-                f"ADS×C + SS(C) = {cover_ads:g} + {ss_c:g} = {ads_cover:g}."
+                f"ceil(ADS×C + SS(C)) = ceil({ads:g}×{cover} + {ss_c:g}) → {ads_cover:g}."
             ),
         },
         {
@@ -260,18 +287,16 @@ def item_math_explain_table(
         {
             "Column": f"AI Target Qty (cover C={cover})",
             "Value": f"{target:g}",
-            "What it means": "Cover need after arrival (before min floor).",
+            "What it means": "Cover need after arrival (whole units).",
             "How / where it comes from": (
-                f"(ADS×C×uplift) + SS(C) = {uplifted_cover:g} + {ss_c:g} = {target:g}."
+                f"ceil(ADS×C×uplift + SS(C)) = ceil({ads:g}×{cover}×{uplift:g} + {ss_c:g}) → {target:g}."
             ),
         },
         {
-            "Column": "Desired Stock (max cover, min)",
+            "Column": "Desired Stock",
             "Value": f"{desired:g}",
-            "What it means": "Order-up-to level after arrival = max(AI cover target, Min).",
-            "How / where it comes from": (
-                f"max({target:g}, {min_oh:g}) = {desired:g}."
-            ),
+            "What it means": "Order-up-to level after arrival (= AI cover target).",
+            "How / where it comes from": f"Desired = AI target = {desired:g}.",
         },
         {
             "Column": "Stock at arrival",
@@ -286,16 +311,15 @@ def item_math_explain_table(
             "Value": f"{qty:g}",
             "What it means": "Final units to buy after pack/case rounding.",
             "How / where it comes from": (
-                f"raw = max(0, desired − stock at arrival) = "
-                f"max(0, {desired:g} − {at_arrival:g}) = {raw:g}; "
-                f"then case round (≥80% of pack {pack})."
+                f"raw need = max(0, {desired:g} − {at_arrival:g}) = {raw:g}; "
+                f"round UP to full cases (pack {pack}) → {qty:g} units."
             ),
         },
         {
             "Column": "Cases to Order",
             "Value": f"{cases:g}",
-            "What it means": "How many cases that qty represents.",
-            "How / where it comes from": "Qty to order ÷ pack size after case rounding.",
+            "What it means": "Whole cases to buy (never fractional like 0.6).",
+            "How / where it comes from": f"ceil(raw need ÷ pack {pack}) = {cases:g}.",
         },
         {
             "Column": "Last Invoice Qty",
@@ -329,28 +353,28 @@ def format_item_math(
     cover: int,
     x_days: int,
 ) -> str:
-    """Short step-by-step summary above the full explanation table."""
+    """Full step-by-step math with every formula and plugged-in numbers."""
     name = str(it.get("description") or it.get("item_id") or "Item")
     upc = it.get("upc") or "—"
     on_hand = _num(it.get("available_stock"))
     ads = _num(it.get("ads"))
+    std = _num(it.get("demand_std"))
     lead_ads = _num(it.get("lead_demand_ads"))
     cover_ads = _num(it.get("cover_demand_ads"))
     ss_l = _num(it.get("safety_stock"))
     ss_c = _num(it.get("safety_stock_cover"))
-    if ss_c <= 0:
-        ss_c = max(0.0, round(_num(it.get("ads_cover_qty")) - cover_ads, 4))
+    ads_cover = _num(it.get("ads_cover_qty"))
+    if ss_c <= 0 and ads_cover > 0:
+        ss_c = max(0.0, round(ads_cover - cover_ads, 4))
     rop = _num(it.get("reorder_point"))
     below = bool(it.get("below_reorder_point"))
-    min_oh = _num(it.get("min_on_hand"))
-    min_src = str(it.get("min_on_hand_source") or "none")
-    max_oh = _num(it.get("wecomm_max_on_hand"))
-    below_min = bool(it.get("below_min_on_hand"))
     desired = _num(it.get("desired_stock"))
     if desired <= 0:
-        desired = max(_num(it.get("ai_target_qty")), min_oh)
-    ads_cover = _num(it.get("ads_cover_qty"))
+        desired = _num(it.get("ai_target_qty"))
     uplift = _num(it.get("uplift_multiplier"), 1.0)
+    uplift_rule = it.get("uplift_rule") or "none"
+    p50 = _num(it.get("p50_demand"))
+    p90 = _num(it.get("p90_demand"))
     target = _num(it.get("ai_target_qty"))
     at_arrival = _num(it.get("projected_stock_at_arrival"))
     raw = _num(it.get("raw_qty_to_order"))
@@ -361,23 +385,167 @@ def format_item_math(
     action = it.get("line_action") or "—"
     urgency = it.get("urgency") or "—"
     dos = it.get("days_of_supply")
-    dos_s = f"{dos:g}" if dos is not None else "—"
-    uplifted_cover = round(cover_ads * uplift, 4)
+    dos_after = it.get("days_of_supply_after_order")
+    dos_s = f"{dos:g}" if dos is not None else "n/a (ADS≈0)"
+    dos_after_s = f"{dos_after:g}" if dos_after is not None else "n/a"
+    notes = it.get("validation_notes") or []
+    notes_s = "; ".join(str(n) for n in notes) if notes else "none"
+    last_inv = it.get("last_pallet_qty")
+    last_inv_s = f"{_num(last_inv):g}" if last_inv is not None else "—"
+    lookback = int(_num(it.get("sales_lookback_days"), 90))
+    selling_days = int(_num(it.get("selling_days")))
+    zero_days = int(_num(it.get("zero_sales_days")))
+    if zero_days <= 0 and lookback > 0:
+        zero_days = max(lookback - selling_days, 0)
+    total_sold = _num(it.get("total_units_sold"))
+    avg_sell_day = _num(it.get("avg_units_on_selling_day"))
+    if avg_sell_day <= 0 and selling_days > 0 and total_sold > 0:
+        avg_sell_day = total_sold / selling_days
+    fests = str(it.get("upcoming_festivals") or "").strip() or "none named (weekends still scanned)"
+    fest_applied = bool(it.get("festival_uplift_applied"))
+    just = str(it.get("justification") or "").strip()
+    z = 1.65
+    # Reconstruct intermediate floats for display (API stores ceil'd cover)
+    lead_ads_raw = ads * lead
+    cover_ads_raw = ads * cover
+    uplifted_sales_raw = cover_ads_raw * uplift
+    ads_cover_raw = cover_ads_raw + ss_c
+    ai_raw = uplifted_sales_raw + ss_c
+    at_arrival_raw = max(0.0, on_hand - ads * lead)
+    raw_need_raw = max(0.0, desired - at_arrival)
+    cases_calc = int(math.ceil(raw / pack - 1e-9)) if raw > 1e-9 else 0
+    sigma_note = f"{std:g}" if std > 0 else f"≈0.3×ADS={0.3 * ads:g}"
+    pattern_bar = (
+        f"sold on **{selling_days}** of **{lookback}** days "
+        f"(no sale on **{zero_days}** days)"
+    )
+    if selling_days > 0 and lookback > 0 and selling_days / lookback < 0.25:
+        pattern_bar += " — **intermittent / lumpy** (most days had zero sales)"
+    fest_effect = (
+        f"SKU uplift **applied** ×{uplift:g} (rule: `{uplift_rule}`) — "
+        "this item historically spikes on those tags"
+        if fest_applied and uplift > 1.0
+        else (
+            f"calendar checked; **no SKU uplift** for this item (×{uplift:g}) — "
+            "festival alone does not raise qty unless this SKU learned a lift"
+        )
+    )
 
     return f"""### {name}
-**UPC:** `{upc}` · **Demand class:** `{dclass}` · **Action:** `{action}` · **Urgency:** `{urgency}`  
-**X = L({lead})+C({cover}) = {x_days} days** · **Days of supply now:** `{dos_s}`
+| | |
+|:--|:--|
+| **UPC** | `{upc}` |
+| **Demand class** | `{dclass}` |
+| **Action / Urgency** | `{action}` / `{urgency}` |
+| **Inputs** | L = **{lead}** d · C = **{cover}** d · X = L+C = **{x_days}** d · pack = **{pack}** |
+| **Days of supply now** | `{dos_s}` = OH ÷ ADS = {on_hand:g} ÷ {ads:g} |
+| **Days of supply after order** | `{dos_after_s}` ≈ (at arrival + qty) ÷ ADS |
+| **Sales pattern** | {pattern_bar} |
 
-**ROP = trigger only** (when to care). **Qty = cover after arrival** (what to buy).
+---
 
-**1) ADS** → `{ads:g}` / day  
-**2) ROP (trigger)** → `ADS×L + SS(L)` = `{rop:g}`, below=`{str(below).upper()}`  
-**3) Cover need** → `(ADS×C×uplift)+SS(C)` = `{uplifted_cover:g}+{ss_c:g}` → AI cover `{target:g}`  
-**4) Min / Max (Wecomm)** → min=`{min_oh:g}` (`{min_src}`), max=`{max_oh:g or 'none'}`, below min=`{str(below_min).upper()}`  
-**5) Desired** → `max(cover, min)` then ≤ max → **`{desired:g}`**  
-**6) Stock at arrival** → `max(0, OH−ADS×L)` = **`{at_arrival:g}`**  
-**7) Order** → `desired − at arrival` = raw `{raw:g}` → pack (≥80% of {pack}) → **qty={qty:g}**, **cases={cases:g}**  
-**8) SS split** → SS(L)=`{ss_l:g}` for ROP only; SS(C)=`{ss_c:g}` in cover/order · ADS cover base=`{ads_cover:g}`
+### A) Demand speed + sales pattern
+**1. ADS (avg daily sales, last {lookback}d)**  
+`ADS = (units sold in lookback) ÷ lookback days`  
+→ total sold **`{total_sold:g}`** ÷ **{lookback}** → **ADS = `{ads:g}` units/day**  
+Daily σ used in safety stock → **σ = `{sigma_note}`**
+
+**1a. Sanity baseline — ADS × X (before SS / uplift / ML)**  
+`ADS × X = {ads:g} × {x_days} = {_num(it.get('ads_times_x'), ads * x_days):g}`  
+→ Use this as a gut-check: final qty should be in the same ballpark unless SS/uplift/pack round moves it.
+
+**1b. How often it actually sold (so you can see the pattern)**  
+In the last **{lookback}** days this SKU sold on **`{selling_days}`** day(s);  
+**`{zero_days}`** day(s) had **no sale**.  
+On a selling day, avg ≈ **`{avg_sell_day:g}`** units.  
+*(Example reading: “sold on 5 days, rest of the 90 had zero” = lumpy demand — ADS is low because zeros pull the average down.)*
+
+---
+
+### B) Lead window L — burn + ROP (trigger only, not order qty)
+**2. Lead demand (expected sell while waiting)**  
+`Lead demand = ADS × L = {ads:g} × {lead} = {lead_ads_raw:g}`  
+→ stored **`{lead_ads:g}`**
+
+**3. Safety stock for lead SS(L)**  
+`SS(L) = Z × σ × √L` with Z≈{z:g} (≈95% service)  
+`SS(L) = {z:g} × {std:g} × √{lead}` → **`{ss_l:g}`**  
+*(ROP buffer only — do **not** add this into the PO by itself)*
+
+**4. Reorder point (when to care)**  
+`ROP = ADS×L + SS(L) = {lead_ads_raw:g} + {ss_l:g} = {lead_ads_raw + ss_l:g}`  
+→ **ROP = `{rop:g}`**  
+Below ROP? `OH < ROP` → `{on_hand:g} < {rop:g}` → **`{str(below).upper()}`**
+
+**5. Stock left when truck arrives**  
+`stock_at_arrival = max(0, OH − ADS×L) = max(0, {on_hand:g} − {lead_ads_raw:g})`  
+→ **`{at_arrival:g}`** (API: `{at_arrival:g}`; raw calc `{at_arrival_raw:g}`)  
+If OH was already 0, arrival stock stays 0 — we do **not** add lead demand onto the PO.
+
+---
+
+### C) Cover window C — what we order for
+**6. Cover demand (sales after arrival)**  
+`Cover demand (raw) = ADS × C = {ads:g} × {cover} = {cover_ads_raw:g}`  
+`Cover demand (stored) = ceil(ADS×C)` → **`{cover_ads:g}`** whole units
+
+**7. Safety stock for cover SS(C)**  
+`SS(C) = Z × σ × √C = {z:g} × {std:g} × √{cover}` → **`{ss_c:g}`**  
+*(this buffer **is** inside the order target)*
+
+**8. Festival / weekend calendar in the next X = {x_days} days**  
+Upcoming: **{fests}**  
+Effect on this SKU: {fest_effect}  
+*('Today' = API `as_of_date` from the server clock in `REORDER_TZ`, default America/Detroit (Michigan) — not the browser. Engine scans each day in X; only SKUs with a learned lift raise cover sales.)*
+
+**9. Uplift on expected cover sales only**  
+`uplift = {uplift:g}` (rule: `{uplift_rule}`) — multiplies **ADS×C**, not SS  
+`uplifted cover sales = ADS×C×uplift = {cover_ads_raw:g} × {uplift:g} = {uplifted_sales_raw:g}`
+
+**10. ADS cover qty (no uplift, whole units)**  
+`ADS cover = ceil(ADS×C + SS(C)) = ceil({cover_ads_raw:g} + {ss_c:g}) = ceil({ads_cover_raw:g})`  
+→ **`{ads_cover:g}`**
+
+**11. AI cover target / Desired stock (whole units)**  
+`AI target = ceil(ADS×C×uplift + SS(C)) = ceil({uplifted_sales_raw:g} + {ss_c:g}) = ceil({ai_raw:g})`  
+→ **AI target = `{target:g}`**  
+→ **Desired = `{desired:g}`** (same as AI target; min-on-hand not used)
+
+---
+
+### D) Order qty — full cases only
+**12. Raw need**  
+`raw_need = max(0, Desired − stock_at_arrival) = max(0, {desired:g} − {at_arrival:g})`  
+→ **`{raw:g}`**
+
+**13. Round UP to full cases**  
+`cases = ceil(raw_need ÷ pack) = ceil({raw:g} ÷ {pack})` → **`{cases:g}`** (whole; never 0.6)  
+`qty_to_order = cases × pack = {cases:g} × {pack}` → **`{qty:g}` units**  
+(check: ceil path → {cases_calc} cases)
+
+**14. Final recommendation**  
+**Action `{action}`** · **Urgency `{urgency}`** · buy **`{qty:g}` units** = **`{cases:g}` cases**
+
+---
+
+### E) Justification (why this action)
+{just if just else "_No justification text returned._"}
+
+---
+
+### F) Reference only (does **not** set qty)
+**15. ML for X = {x_days}d** · class `{dclass}`  
+P50 = `{p50:g}` · P90 = `{p90:g}` — shown for comparison only  
+**16. Last invoice qty** = `{last_inv_s}` — reference only  
+
+**17. Notes** — {notes_s}
+
+---
+**One-line summary:**  
+ROP `{rop:g}` says *when* to worry (`below={str(below).upper()}`).  
+Desired `{desired:g}` = cover for **C={cover}** days after arrival.  
+Order = round up (`{raw:g}` → `{qty:g}` units / `{cases:g}` cases).  
+Sales pattern: `{selling_days}` selling / `{zero_days}` zero-sale days in `{lookback}`d.
 """
 
 # ── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -405,7 +573,7 @@ def safe_call(fn, *args, **kwargs) -> dict[str, Any] | None:
     except requests.Timeout:
         st.error(
             f"API timed out at {api_base()}. "
-            "Keep ‘Generate justifications’ off for demos, then retry."
+            "Retry, or check that the API is running."
         )
     except requests.HTTPError as exc:
         detail = ""
@@ -431,10 +599,164 @@ def cached_tool_names() -> list[str]:
 # ── Page setup ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Reorder AI Demo",
-    page_icon="📦",
+    page_title="Reorder AI",
+    page_icon="🔷",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# Blue visual system (overrides Streamlit default red/pink primary)
+st.markdown(
+    """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600;700&display=swap');
+
+html, body, [class*="css"] {
+  font-family: "DM Sans", "Segoe UI", sans-serif;
+}
+
+.stApp {
+  background:
+    radial-gradient(1200px 500px at 10% -10%, #cfe4f7 0%, transparent 55%),
+    radial-gradient(900px 420px at 100% 0%, #d9ebf8 0%, transparent 50%),
+    linear-gradient(180deg, #eef4fa 0%, #f7fafc 40%, #f4f7fb 100%);
+}
+
+/* Primary buttons → blue */
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="baseButton-primary"] {
+  background: linear-gradient(135deg, #1B6CA8 0%, #0E4D7A 100%) !important;
+  border: none !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+  box-shadow: 0 6px 18px rgba(14, 77, 122, 0.28);
+}
+.stButton > button[kind="primary"]:hover,
+.stButton > button[data-testid="baseButton-primary"]:hover {
+  background: linear-gradient(135deg, #2280c4 0%, #155a8a 100%) !important;
+}
+
+/* Secondary / default buttons */
+.stButton > button {
+  border-radius: 10px !important;
+  border-color: #9ec0db !important;
+  color: #0F2744 !important;
+}
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] {
+  gap: 8px;
+  background: transparent;
+}
+.stTabs [data-baseweb="tab"] {
+  background: rgba(255,255,255,0.55);
+  border-radius: 10px 10px 0 0;
+  padding: 10px 18px;
+  color: #3a5a78;
+  font-weight: 600;
+}
+.stTabs [aria-selected="true"] {
+  background: #fff !important;
+  color: #1B6CA8 !important;
+  box-shadow: 0 -2px 0 #1B6CA8 inset;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, #0E4D7A 0%, #143d63 45%, #0f2f4d 100%);
+}
+section[data-testid="stSidebar"] * {
+  color: #eaf3fb !important;
+}
+section[data-testid="stSidebar"] .stTextInput input {
+  background: rgba(255,255,255,0.12) !important;
+  color: #fff !important;
+  border: 1px solid rgba(255,255,255,0.25) !important;
+}
+section[data-testid="stSidebar"] .stButton > button {
+  background: rgba(255,255,255,0.12) !important;
+  color: #fff !important;
+  border: 1px solid rgba(255,255,255,0.28) !important;
+}
+section[data-testid="stSidebar"] pre,
+section[data-testid="stSidebar"] code {
+  background: rgba(0,0,0,0.25) !important;
+  color: #d6ebfa !important;
+}
+
+/* Metrics */
+div[data-testid="stMetric"] {
+  background: #fff;
+  border: 1px solid #d5e4f2;
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: 0 8px 24px rgba(15, 39, 68, 0.06);
+}
+div[data-testid="stMetric"] label { color: #5a7a96 !important; }
+div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+  color: #0E4D7A !important;
+  font-weight: 700;
+}
+
+/* Dataframes / inputs */
+div[data-testid="stDataFrame"] {
+  border: 1px solid #d5e4f2;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(15, 39, 68, 0.05);
+}
+
+/* Hero */
+.rai-hero {
+  background: linear-gradient(120deg, #0E4D7A 0%, #1B6CA8 55%, #3a8fd1 100%);
+  color: #fff;
+  border-radius: 18px;
+  padding: 1.6rem 1.8rem 1.4rem;
+  margin-bottom: 1.1rem;
+  box-shadow: 0 16px 40px rgba(14, 77, 122, 0.28);
+  position: relative;
+  overflow: hidden;
+}
+.rai-hero::after {
+  content: "";
+  position: absolute;
+  right: -40px; top: -40px;
+  width: 180px; height: 180px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.12);
+}
+.rai-hero h1 {
+  font-family: "Fraunces", Georgia, serif;
+  font-size: 2rem;
+  margin: 0 0 0.35rem 0;
+  letter-spacing: -0.02em;
+}
+.rai-hero p {
+  margin: 0;
+  opacity: 0.92;
+  max-width: 46rem;
+  font-size: 1.02rem;
+}
+.rai-chip {
+  display: inline-block;
+  margin-top: 0.85rem;
+  background: rgba(255,255,255,0.16);
+  border: 1px solid rgba(255,255,255,0.28);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.rai-panel {
+  background: rgba(255,255,255,0.72);
+  border: 1px solid #d5e4f2;
+  border-radius: 14px;
+  padding: 0.85rem 1rem;
+  margin: 0.6rem 0 1rem 0;
+}
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
 if "api_base" not in st.session_state:
@@ -450,13 +772,13 @@ if "vendors" not in st.session_state:
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("Reorder AI")
-    st.caption("Demo UI over FastAPI endpoints")
+    st.markdown("### Reorder AI")
+    st.caption("Blue ops console · FastAPI demo")
 
     st.session_state.api_base = st.text_input(
         "API base URL",
         value=st.session_state.api_base,
-        help="Use 8001 if that is where the updated server is running.",
+        help="Live VM default: http://74.249.36.238:8000",
     )
 
     c1, c2 = st.columns(2)
@@ -475,7 +797,7 @@ with st.sidebar:
                     st.warning(data)
 
     st.divider()
-    st.markdown("**Endpoints used**")
+    st.markdown("**Endpoints**")
     st.code(
         "GET  /api/health\n"
         "GET  /api/db-health\n"
@@ -492,6 +814,21 @@ with st.sidebar:
         st.markdown(f"[Swagger →]({api_base()}/docs)")
 
 
+# ── Hero ─────────────────────────────────────────────────────────────────────
+
+st.markdown(
+    """
+<div class="rai-hero">
+  <h1>Reorder AI</h1>
+  <p>Vendor reorder recommendations from live stock, ADS, and nightly forecasts —
+  sized for lead time + cover, rounded to full cases.</p>
+  <span class="rai-chip">Detect order · Festival calendar · Nightly ML</span>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 
 tab_order, tab_chat, tab_run, tab_tools = st.tabs(
@@ -502,12 +839,13 @@ tab_order, tab_chat, tab_run, tab_tools = st.tabs(
 # ── Tab 1: Detect order ──────────────────────────────────────────────────────
 
 with tab_order:
-    st.subheader("W-1 Detect order workflow")
-    st.write(
-        "Pick a vendor, set **lead time (L)** and **days to cover (C)**. "
-        "Order is sized for **X = L + C**: sales during lead + stock to cover after arrival. "
-        "ML P50/P90 (+ uplift) apply to that full window. "
-        "A case is suggested only if need ≥ **80%** of pack."
+    st.subheader("Detect order")
+    st.markdown(
+        '<div class="rai-panel">'
+        "Pick a vendor, set <b>lead time (L)</b> and <b>days to cover (C)</b>. "
+        "Order window is <b>X = L + C</b>. Qty rounds <b>up to full cases</b>."
+        "</div>",
+        unsafe_allow_html=True,
     )
 
     top = st.columns([1, 1, 2])
@@ -552,17 +890,11 @@ with tab_order:
     with c_x:
         st.metric("Order window X = L + C", f"{int(lead) + int(cover)} days")
 
-    opts = st.columns(3)
-    with opts[0]:
-        include_zero = st.checkbox(
-            "Include full catalog (SKIP / already covered)",
-            value=False,
-            help="Default shows ORDER + WATCH only. Turn on to audit every SKU.",
-        )
-    with opts[1]:
-        gen_just = st.checkbox("Generate justifications (slower)", value=False)
-    with opts[2]:
-        st.write("")
+    include_zero = st.checkbox(
+        "Include full catalog (SKIP / already covered)",
+        value=False,
+        help="Default shows ORDER + WATCH only. Turn on to audit every SKU.",
+    )
 
     if st.button("Run detect-order", type="primary", use_container_width=True):
         with st.spinner("Calling POST /api/detect-order …"):
@@ -572,7 +904,6 @@ with tab_order:
                 "lead_time_days": int(lead),
                 "time_to_cover_days": int(cover),
                 "include_zero_orders": bool(include_zero),
-                "generate_justification": bool(gen_just),
             }
             data = safe_call(_post, "/api/detect-order", body)
             if data is not None:
@@ -588,6 +919,11 @@ with tab_order:
 
     result = st.session_state.order_result
     if result:
+        st.warning(
+            "Showing the **last detect-order run** stored in this browser session. "
+            "After code/math fixes, click **Run detect-order** again — old rows "
+            "(e.g. DryApricots qty 100) will not update by themselves."
+        )
         st.divider()
         m1, m2, m3, m4, m5, m6 = st.columns(6)
         m1.metric("Catalog", result.get("catalog_item_count") or result.get("item_count") or 0)
@@ -596,6 +932,13 @@ with tab_order:
         m4.metric("Cases", result.get("total_cases_to_order", 0))
         m5.metric("DB", result.get("db_mode", "—"))
         m6.metric("Forecast", result.get("forecast_mode", "—"))
+        as_of = result.get("as_of_date") or "—"
+        fests = (result.get("upcoming_festivals") or "").strip() or "none named"
+        st.info(
+            f"**Calendar as of {as_of}** (API server clock, timezone `REORDER_TZ`, "
+            f"default America/Detroit — Michigan — not your browser date). "
+            f"**Festivals in next X={result.get('x_days') or (int(lead)+int(cover))} days:** {fests}"
+        )
         st.caption(result.get("message") or "")
         rid = result.get("run_id")
         if rid:
@@ -608,7 +951,7 @@ with tab_order:
             x_days = int(result.get("x_days") or (int(lead) + int(cover)))
             st.caption(
                 f"Columns use window **X = {x_days} days** (L={result.get('lead_time_days', lead)} "
-                f"+ C={result.get('time_to_cover_days', cover)}). Justification is not shown in the table."
+                f"+ C={result.get('time_to_cover_days', cover)})."
             )
             st.dataframe(
                 order_items_dataframe(items, x_days=x_days),

@@ -103,7 +103,9 @@ class ForecastStore:
             return 1.0, None
         best = 1.0
         best_name: str | None = None
-        start = date.today()
+        from v2.forecasting.festival_calendar import reorder_as_of_date
+
+        start = reorder_as_of_date()
         for key in keys:
             if key not in table:
                 continue
@@ -143,12 +145,10 @@ class ForecastStore:
                 if uplift_m > 1.0:
                     p50 = round(p50 * uplift_m, 4)
                     p90 = round(p90 * uplift_m, 4)
+                # ADS comes from live 90d sales only — never invent from P50.
+                # (P50/P90 stay ML reference; zero sales ⇒ ADS=0 ⇒ SKIP dead stock.)
                 stats = self.get_demand_stats([item]).get(item) or {}
                 ads = float(stats.get("ads") or 0.0)
-                if ads <= 0 and h > 0:
-                    # derive ADS from base (pre-uplift) P50 when stats missing
-                    base_p50 = float(row["p50"])
-                    ads = base_p50 / float(h)
                 return {
                     "item_id": item,
                     "horizon_days": int(h),
@@ -211,15 +211,27 @@ class ForecastStore:
                 )
                 if not df.empty:
                     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
+                    lookback = float(SALES_LOOKBACK_DAYS)
                     for item, g in df.groupby(df["item_id"].astype(str)):
+                        sold = g[g["quantity"] > 0]
                         total = float(g["quantity"].sum())
-                        ads = total / float(SALES_LOOKBACK_DAYS)
-                        std = float(g["quantity"].std(ddof=1)) if len(g) > 1 else ads * 0.3
+                        ads = total / lookback
+                        # σ over selling days only (sparse); floor with ADS×0.3
+                        std = float(sold["quantity"].std(ddof=1)) if len(sold) > 1 else ads * 0.3
                         if pd.isna(std):
                             std = ads * 0.3
+                        selling_days = int(len(sold))
+                        zero_days = int(max(int(lookback) - selling_days, 0))
                         stats[str(item)] = {
                             "ads": max(ads, 0.0),
                             "demand_std": max(float(std), 0.0),
+                            "sales_lookback_days": float(lookback),
+                            "selling_days": float(selling_days),
+                            "zero_sales_days": float(zero_days),
+                            "total_units_sold": max(total, 0.0),
+                            "avg_units_on_selling_day": (
+                                max(total / selling_days, 0.0) if selling_days > 0 else 0.0
+                            ),
                         }
             except Exception:
                 stats = {}

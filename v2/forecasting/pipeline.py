@@ -20,11 +20,20 @@ STANDARD_HORIZONS = (7, 14, 21, 30, 45)
 
 
 def _series_for_item(daily: pd.DataFrame, item_id: str) -> pd.Series:
+    """Daily qty for one SKU, zero-padded across the full catalog date span.
+
+    Padding to catalog min→max (not just this SKU's first/last sale) matters:
+    a single historical sale must not become a 1-day series with p=1.0.
+    """
     g = daily.loc[daily["item_id"].astype(str) == str(item_id)].sort_values("date")
     if g.empty:
         return pd.Series(dtype=float)
     s = g.set_index("date")["quantity"]
-    full_idx = pd.date_range(s.index.min(), s.index.max(), freq="D")
+    dates = pd.to_datetime(daily["date"], errors="coerce").dropna()
+    if dates.empty:
+        full_idx = pd.date_range(s.index.min(), s.index.max(), freq="D")
+    else:
+        full_idx = pd.date_range(dates.min(), dates.max(), freq="D")
     return s.reindex(full_idx, fill_value=0.0)
 
 

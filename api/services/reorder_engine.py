@@ -8,31 +8,24 @@ Goals (replace gut-feel):
 
 Core:
   ROP      = ADS×L + SS(L)          → trigger / urgency only (NOT an order floor)
-  Cover    = (ADS×C×uplift) + SS(C) → what you want after the truck arrives
-  Arrival  = max(0, OH − ADS×L)     → burn on-hand during lead
-  Min      = Wecomm min only (>0)   → floor on desired (no ROP fallback — avoids overstock)
-  Max      = Wecomm max if set      → hard cap on desired
-  Desired  = clamp(max(Cover, Min), ≤ Max)
-  Order    = pack_round(max(0, Desired − Arrival))  (≥80% case fill)
+  Cover    = ceil((ADS×C×uplift) + SS(C))  → whole units after arrival
+  Arrival  = max(0, OH − ADS×L)            → burn on-hand during lead
+  Desired  = Cover (integer); optional Wecomm max cap if set
+  Order    = round UP to full cases (pack multiples); cases is a whole number
 
-Dead stock (ADS≈0): do not order unless Wecomm min requires a restock.
-ML P50/P90: reference only.
+Dead stock (ADS≈0): skip. ML P50/P90: reference only.
 """
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any
 
-from v2.inventory_math.pack_size import (
-    normalize_pack_size,
-    pack_units_ordered,
-    round_up_to_pack,
-)
+from v2.inventory_math.pack_size import normalize_pack_size
 from v2.inventory_math.reorder_point import calculate_dynamic_reorder_point
 from v2.inventory_math.safety_stock import calculate_safety_stock
 
-CASE_FILL_RATIO = 0.80
 DEFAULT_MAX_DEMAND_CV = 2.0
 # Treat ADS below this as "no demand" for ordering (noise / one-off scans).
 ADS_DEAD_EPS = 1e-6
@@ -95,7 +88,6 @@ def _line_action(
     *,
     qty: float,
     below_rop: bool,
-    below_min: bool,
     skip_dead: bool,
     ads: float,
 ) -> str:
@@ -103,11 +95,27 @@ def _line_action(
         return "ORDER"
     if skip_dead:
         return "SKIP"
-    if below_rop or below_min:
-        return "WATCH"  # needs attention; case fill / already covered at arrival
+    if below_rop:
+        return "WATCH"
     if ads <= ADS_DEAD_EPS:
         return "SKIP"
     return "SKIP"
+
+
+def _ceil_units(value: float) -> float:
+    """Round up to a whole unit (no fractional cover / order display)."""
+    if value <= 1e-9:
+        return 0.0
+    return float(math.ceil(value - 1e-9))
+
+
+def _round_up_full_cases(raw_need: float, pack: int) -> tuple[float, float]:
+    """Round need up to whole cases. Returns (qty_units, cases)."""
+    if raw_need <= 1e-9:
+        return 0.0, 0.0
+    pack = max(int(pack), 1)
+    cases = int(math.ceil(raw_need / pack - 1e-9))
+    return float(cases * pack), float(cases)
 
 
 def compute_line_reorder(
@@ -125,13 +133,14 @@ def compute_line_reorder(
     effective_days: float,
     uplift_multiplier: float = 1.0,
     service_level: float = 0.95,
-    case_fill_ratio: float = CASE_FILL_RATIO,
+    case_fill_ratio: float | None = None,  # unused — units suggested, no case gate
     ml_ads_cap_ratio: float | None = None,
     wecomm_min_on_hand: float = 0.0,
     wecomm_max_on_hand: float = 0.0,
 ) -> dict[str, Any]:
     """Return sizing + action fields for one SKU."""
     del ml_ads_cap_ratio
+    del case_fill_ratio
     lead = max(int(lead_days), 0)
     cover = max(int(cover_days), 0)
     x = max(int(x_days), 1)
@@ -142,7 +151,7 @@ def compute_line_reorder(
     std_f = _capped_demand_std(ads_f, std_raw)
     uplift = max(float(uplift_multiplier or 1.0), 0.0)
     on_hand = max(float(available), 0.0)
-    wecomm_min = max(float(wecomm_min_on_hand or 0.0), 0.0)
+    del wecomm_min_on_hand  # min on hand removed from ordering
     wecomm_max = max(float(wecomm_max_on_hand or 0.0), 0.0)
 
     # --- ROP (trigger only) ---
@@ -163,6 +172,8 @@ def compute_line_reorder(
     stock_at_arrival = max(0.0, on_hand - ads_f * lead) if lead > 0 else on_hand
 
     # --- Cover C (order sizes to this) ---
+    # When effective window X is set, cover days = X − L (arrival → end of window).
+    # cover_days is the fallback only when effective_days is not provided.
     if eff > 0:
         cover_eff = max(eff - float(lead), 0.0)
     else:
@@ -176,35 +187,25 @@ def compute_line_reorder(
     )
     base_expected = ads_f * cover_eff if has_demand and cover_eff > 0 else 0.0
     uplifted_expected = base_expected * uplift
-    ads_cover = round(base_expected + ss_c, 2)
-    ai_target = round(uplifted_expected + ss_c, 2)
+    # Whole units only (ceil) — no fractional cover days / targets
+    ads_cover = _ceil_units(base_expected + ss_c)
+    ai_target = _ceil_units(uplifted_expected + ss_c)
 
-    # Dead stock: no sales → no cover order (unless store min forces restock)
-    skip_dead = (not has_demand) and wecomm_min <= 0
-    if not has_demand and wecomm_min <= 0:
+    # Dead stock: no sales → no order
+    skip_dead = not has_demand
+    if skip_dead:
         ai_target = 0.0
         ads_cover = 0.0
 
-    # --- Min / max (Wecomm only — ROP is NOT a qty floor) ---
-    if wecomm_min > 0:
-        min_on_hand = round(wecomm_min, 2)
-        min_source = "wecomm"
-    else:
-        min_on_hand = 0.0
-        min_source = "none"
-
-    desired = max(ai_target, min_on_hand)
-    min_raised_target = desired > ai_target + 1e-9
+    desired = float(ai_target)
     max_capped = False
-    if wecomm_max > 0:
+    if wecomm_max > 0 and not skip_dead:
         capped = min(desired, wecomm_max)
         if capped + 1e-9 < desired:
             max_capped = True
-        desired = capped
-        # Never order up into stock already above max
+        desired = _ceil_units(capped) if capped > 0 else 0.0
         if stock_at_arrival >= wecomm_max:
-            desired = stock_at_arrival  # raw need → 0
-    desired = round(desired, 2)
+            desired = _ceil_units(stock_at_arrival)  # raw need → 0
 
     # ML reference (full X)
     if eff <= 0:
@@ -218,30 +219,26 @@ def compute_line_reorder(
     if cover_eff > 0 and has_demand:
         cover_h = int(max(round(cover_eff), 1))
         cover_demand_p90 = scale_forecast(p90_full, stored_horizon, cover_h)
-        cover_demand_ads = round(ads_f * cover_eff, 4)
+        cover_demand_ads = _ceil_units(ads_f * cover_eff)
     else:
         cover_demand_p90 = 0.0
         cover_demand_ads = 0.0
 
     below_rop = bool(on_hand < rop) if rop > 0 else bool(on_hand <= 0 and ai_target > 0)
-    below_min = bool(on_hand < min_on_hand) if min_on_hand > 0 else False
 
     raw_need = 0.0 if skip_dead else max(0.0, desired - stock_at_arrival)
-    qty_units = float(
-        round_up_to_pack(raw_need, pack, min_fill_ratio=case_fill_ratio)
-    )
-    # Anti-overstock after pack round: if max set, never exceed max at arrival+qty
+    qty_units, cases = _round_up_full_cases(raw_need, pack)
+    # Optional Wecomm max: trim down to whole cases that still fit under max
     if wecomm_max > 0 and qty_units > 0:
         room = max(0.0, wecomm_max - stock_at_arrival)
-        if qty_units > room + 1e-6:
-            trimmed = float(round_up_to_pack(room, pack, min_fill_ratio=1.0))
-            # Prefer under max: step down by pack until fits
-            while trimmed > 0 and stock_at_arrival + trimmed > wecomm_max + 1e-6:
-                trimmed = max(0.0, trimmed - pack)
-            qty_units = trimmed
+        max_cases = int(math.floor(room / pack + 1e-9)) if pack > 0 else 0
+        if max_cases <= 0:
+            qty_units, cases = 0.0, 0.0
+        elif cases > max_cases:
+            cases = float(max_cases)
+            qty_units = float(max_cases * pack)
 
     did_round = abs(qty_units - raw_need) > 1e-6
-    cases = float(pack_units_ordered(int(qty_units), pack)) if qty_units > 0 else 0.0
 
     dos = _days_of_supply(on_hand, ads_f)
     dos_after = _days_of_supply(stock_at_arrival + qty_units, ads_f)
@@ -251,13 +248,12 @@ def compute_line_reorder(
         rop=float(rop),
         below_rop=below_rop,
         qty=qty_units,
-        wecomm_min=wecomm_min,
+        wecomm_min=0.0,
         skip_dead=skip_dead,
     )
     action = _line_action(
         qty=qty_units,
         below_rop=below_rop,
-        below_min=below_min,
         skip_dead=skip_dead,
         ads=ads_f,
     )
@@ -271,20 +267,22 @@ def compute_line_reorder(
         "safety_stock_cover": float(ss_c),
         "reorder_point": float(rop),
         "below_reorder_point": bool(below_rop),
-        "wecomm_min_on_hand": round(wecomm_min, 2),
+        "wecomm_min_on_hand": 0.0,
         "wecomm_max_on_hand": round(wecomm_max, 2),
-        "min_on_hand": float(min_on_hand),
-        "min_on_hand_source": min_source,
-        "below_min_on_hand": bool(below_min),
-        "min_raised_target": bool(min_raised_target),
+        "min_on_hand": 0.0,
+        "min_on_hand_source": "none",
+        "below_min_on_hand": False,
+        "min_raised_target": False,
         "max_capped_target": bool(max_capped),
         "lead_demand_ads": float(lead_demand_ads),
         "lead_demand_p50": round(float(lead_demand_p50), 2),
         "cover_demand_ads": float(cover_demand_ads),
         "cover_demand_p90": round(float(cover_demand_p90), 2),
         "ads_cover_qty": float(ads_cover),
-        "expected_sales_x": round(base_expected, 2),
-        "uplifted_expected_x": round(uplifted_expected, 2),
+        # Sanity baseline: ADS × full window X (before SS / uplift / ML polish)
+        "ads_times_x": round(ads_f * float(x), 4) if has_demand else 0.0,
+        "expected_sales_x": float(_ceil_units(base_expected)),
+        "uplifted_expected_x": float(_ceil_units(uplifted_expected)),
         "uplift_multiplier": float(uplift),
         "p50_demand": round(p50_x, 2),
         "p90_demand": round(p90_x, 2),

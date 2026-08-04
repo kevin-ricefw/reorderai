@@ -81,7 +81,7 @@ if (Test-Path $EnvFile) {
         "DB_PORT=5432" `
         "DB_SSLMODE=require" | Out-Null
 
-    foreach ($key in @("DB_DATABASE", "DB_USERNAME", "DB_PASSWORD", "DB_CONNECTION", "TENANT_SCHEMA", "OPENAI_API_KEY", "OPENAI_MODEL")) {
+    foreach ($key in @("DB_DATABASE", "DB_USERNAME", "DB_PASSWORD", "DB_CONNECTION", "TENANT_SCHEMA")) {
         if ($pairs.ContainsKey($key) -and $pairs[$key]) {
             az webapp config appsettings set -g $Rg -n $AppName --settings "$key=$($pairs[$key])" | Out-Null
         }

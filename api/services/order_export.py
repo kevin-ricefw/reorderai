@@ -9,7 +9,7 @@ import pandas as pd
 
 
 def _export_cols(x_days: int | None) -> list[tuple[str, str]]:
-    del x_days  # kept for call-site compat
+    x_label = f"ADS × {int(x_days)}d" if x_days and int(x_days) > 0 else "ADS × X"
     return [
         ("line_action", "Action"),
         ("urgency", "Urgency"),
@@ -18,24 +18,21 @@ def _export_cols(x_days: int | None) -> list[tuple[str, str]]:
         ("sku", "SKU"),
         ("available_stock", "On Hand"),
         ("days_of_supply", "Days of Supply"),
-        ("ads", "ADS (units/day)"),
+        ("ads", "ADS / day"),
+        ("ads_times_x", x_label),
         ("reorder_point", "Reorder Point (ROP)"),
         ("below_reorder_point", "Below ROP"),
-        ("min_on_hand", "Min On Hand"),
-        ("min_on_hand_source", "Min Source"),
-        ("wecomm_max_on_hand", "Max On Hand"),
-        ("below_min_on_hand", "Below Min"),
         ("desired_stock", "Desired Stock"),
         ("projected_stock_at_arrival", "Stock at Arrival"),
-        ("ai_target_qty", "AI Cover Target"),
+        ("ai_target_qty", "AI Target (cover+SS+uplift)"),
         ("qty_to_order", "Qty to Order"),
         ("cases_to_order", "Cases to Order"),
         ("box_qty", "Pack Size"),
         ("lead_demand_ads", "Lead Demand (L)"),
-        ("cover_demand_ads", "Cover Demand (C)"),
+        ("cover_demand_ads", "Cover Demand (X−L)"),
         ("safety_stock", "SS(L)"),
-        ("safety_stock_cover", "SS(C)"),
-        ("ads_cover_qty", "ADS Cover Qty"),
+        ("safety_stock_cover", "SS(X−L)"),
+        ("ads_cover_qty", "ADS Cover (X−L)+SS"),
         ("uplift_multiplier", "Uplift ×"),
         ("uplift_rule", "Uplift Rule"),
         ("last_pallet_qty", "Last Invoice Qty"),

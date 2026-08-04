@@ -34,6 +34,35 @@ def test_classify_single_demand_day():
     assert out["demand_class"] == "single_demand_day"
 
 
+def test_rule_based_one_day_series_not_daily_certainty():
+    """A single historical sale must not become p=1.0 (sell every day)."""
+    from v2.forecasting.croston import fit_rule_based
+
+    y = pd.Series([10.0], index=pd.to_datetime(["2026-01-07"]))
+    p = fit_rule_based(y)
+    assert p.model == "rule"
+    assert p.demand_probability <= 1.0 / 90 + 1e-9
+    assert p.expected_daily <= 10.0 / 90 + 1e-9
+
+
+def test_single_demand_day_forecast_not_inflated():
+    """One sale of 10 in a long catalog span → P50 over 14d stays small."""
+    start = pd.Timestamp("2026-01-01")
+    rows = [{"item_id": "189", "date": start + pd.Timedelta(days=d), "quantity": 0.0} for d in range(120)]
+    rows[6] = {"item_id": "189", "date": start + pd.Timedelta(days=6), "quantity": 10.0}
+    # Companion SKU stretches the catalog calendar (same as multi-SKU POS dump)
+    rows += [
+        {"item_id": "other", "date": start + pd.Timedelta(days=d), "quantity": 1.0}
+        for d in range(120)
+    ]
+    daily = pd.DataFrame(rows)
+    classifications, forecasts = build_forecast_store_frame(daily, horizons=[14])
+    row = forecasts[(forecasts["item_id"] == "189") & (forecasts["horizon_days"] == 14)].iloc[0]
+    assert str(row["demand_class"]) == "single_demand_day"
+    # Must NOT look like ~10 units/day × 14 ≈ 140
+    assert float(row["p50"]) < 20.0
+
+
 def test_croston_sba_positive_daily():
     y = pd.Series([0.0, 0.0, 10.0, 0.0, 0.0, 12.0, 0.0, 0.0, 9.0, 0.0])
     p = fit_croston_sba(y)

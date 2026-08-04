@@ -24,8 +24,5 @@ pyarrow>=14.0.0
 # Phase 1 Smooth path uses bootstrap; LightGBM optional for later upgrade
 lightgbm>=4.0.0
 
-# Optional GPT justification
-openai>=1.40.0
-
 # Tests
 pytest>=8.0.0

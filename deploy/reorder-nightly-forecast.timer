@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Reorder AI nightly forecast at 02:00 America/Detroit
+Requires=reorder-nightly-forecast.service
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 America/Detroit
+Persistent=true
+Unit=reorder-nightly-forecast.service
+
+[Install]
+WantedBy=timers.target

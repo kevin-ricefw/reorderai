@@ -62,7 +62,3 @@ async def root() -> dict:
             "nightly_batch": "python scripts/run_nightly_forecast.py",
         },
     }
-
-
-def create_app() -> FastAPI:
-    return app
