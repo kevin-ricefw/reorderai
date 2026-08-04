@@ -1,26 +1,41 @@
 # Reorder AI (Wecomm)
 
-Vendor + lead time (**L**) + days to cover (**C**) → reorder sheet with ADS, safety stock, ROP, ML P50/P90, AI target, cases, and Excel.
+Vendor + lead time (**L**) + days to cover (**C**) → buyer action list (ORDER / WATCH / SKIP) with ADS, ROP, cover target, full-case qty, festivals, and Excel.
 
-**Precise flow:** [`docs/W1_DETECT_ORDER_WORKFLOW.md`](docs/W1_DETECT_ORDER_WORKFLOW.md)  
-**Worked example (AASHIRVAAD ATTA):** [`docs/EXAMPLE.md`](docs/EXAMPLE.md)  
-**Full system map:** [`docs/COMPLETE_SYSTEM_WORKFLOW.md`](docs/COMPLETE_SYSTEM_WORKFLOW.md)
+| Doc | Contents |
+|-----|----------|
+| [`docs/W1_DETECT_ORDER_WORKFLOW.md`](docs/W1_DETECT_ORDER_WORKFLOW.md) | Detect-order math (current) |
+| [`docs/EXAMPLE.md`](docs/EXAMPLE.md) | Worked SKU example |
+| [`docs/COMPLETE_SYSTEM_WORKFLOW.md`](docs/COMPLETE_SYSTEM_WORKFLOW.md) | End-to-end system map + tables + APIs |
+| [`docs/PHASE1_FORECASTING.md`](docs/PHASE1_FORECASTING.md) | Nightly ML + phases |
+| [`deploy/TL_API_HANDOFF.md`](deploy/TL_API_HANDOFF.md) | Live API URL for TL |
 
 ```text
-Sales + inventory + vendor map  →  tenant DB
-                │
-                ▼
-Nightly ML batch  →  data/forecast_store/  (class → P50/P90 + uplift)
-                │
-                ▼
-POST /api/detect-order  (X = L + C only)
-  ADS(90d) → SS → ROP flag
-  AI_target = max(P90×uplift, ADS×X+SS)
-  order = pack_round(AI_target − on_hand)   # case if need ≥ 80% pack
-                │
-                ▼
-run_id → Excel export · Streamlit demo · chatbot tools
+Sales CSVs + inventory CSV
+        │
+        ▼
+import_local_to_paul.py  →  tenant DB
+  (ai_pos_daily_sales, product_locations, product_vendor, …)
+        │
+        ▼
+Nightly job (systemd 02:00 America/Detroit)
+  → data/forecast_store/  (class, P50/P90, SKU uplift)
+        │
+        ▼
+POST /api/detect-order   (X = L + C)
+  ADS from live 90d sales only (never invent from P50)
+  ROP = ADS×L + SS(L)           → urgency / WATCH trigger
+  Desired = ceil(ADS×C×uplift + SS(C))
+  Arrival = max(0, OH − ADS×L)
+  qty = round UP to full cases
+  ADS≈0 → SKIP
+        │
+        ▼
+run_id → Excel · Streamlit (blue UI) · chatbot tools
 ```
+
+**Live API:** `http://74.249.36.238:8000`  
+**Demo UI:** Streamlit → set API base to that URL (or local uvicorn).
 
 ---
 
@@ -28,35 +43,40 @@ run_id → Excel export · Streamlit demo · chatbot tools
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # fill DB_* + optional OPENAI_API_KEY
-# Bastion + SSH tunnel → 127.0.0.1:5433
+cp .env.example .env   # fill DB_* + TENANT_SCHEMA
 
-python scripts/import_local_to_paul.py --execute   # optional: reload sales/stock/vendors
+# Optional local tunnel for laptop DB work:
+# Bastion + SSH → 127.0.0.1:5433
+
+python scripts/import_local_to_paul.py --execute   # reload sales/stock/vendors
 python scripts/run_nightly_forecast.py --lookback-days 0
 
-python -m uvicorn api.main:app --host 127.0.0.1 --port 8001
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 python -m streamlit run demo_app/streamlit_app.py --server.port 8501
 # or: run_demo.bat
 ```
 
-- API docs: http://127.0.0.1:8001/docs  
-- Demo UI: http://127.0.0.1:8501  
-- DB check: `GET /api/db-health`
+- API docs: `/docs`
+- Health: `GET /api/health` · DB: `GET /api/db-health`
 
 ---
 
-## Order math (summary)
+## Order math (current)
 
 | Step | Formula |
 |------|---------|
-| Window | **X = L + C** (no extra days) |
-| ADS | units in last **90** days ÷ 90 |
-| ROP | ADS×L + SS — **flag only** (`below_reorder_point`) |
-| AI target | max(P90 for X × uplift, ADS×X + SS_X) |
-| Qty | max(0, target − on-hand), then case round (≥80% pack) |
+| Window | **X = L + C** |
+| ADS | units in last **90** days ÷ 90 (**sales only**; never derived from ML P50) |
+| `ads_times_x` | ADS × X (display / audit) |
+| ROP | ADS×L + SS(L) — **urgency only** |
+| Stock at arrival | max(0, OH − ADS×L) |
+| Desired / AI cover | ceil(ADS×C×uplift + SS(C)) |
+| Qty | max(0, Desired − arrival), then **ceil to full cases** |
+| Dead stock | ADS≈0 → **SKIP**, qty 0 |
+| Actions | **ORDER** / **WATCH** / **SKIP** |
+| Justification | Report-style template (no GPT) |
 
-ROP false does **not** block an order when on-hand is below the full-window target.  
-See [`docs/EXAMPLE.md`](docs/EXAMPLE.md).
+ML P50/P90 are **reference only** — they do not set order qty.
 
 ---
 
@@ -78,28 +98,33 @@ POST /api/detect-order
 {
   "vendor_id": "18",
   "lead_time_days": 3,
-  "time_to_cover_days": 14
+  "time_to_cover_days": 14,
+  "include_zero_orders": false
 }
 ```
 
 ---
 
-## Forecast pipeline
+## Forecast + Azure schedule
 
 ```text
-Nightly batch
+Nightly batch (VM systemd timer @ 02:00 America/Detroit)
   classify (Syntetos–Boylan)
-  → Smooth: LightGBM
+  → Smooth: LightGBM / bootstrap
   → Intermittent: Croston-SBA + Monte Carlo P50/P90
   → Erratic/Lumpy: TSB + Monte Carlo
   → single-demand-day: rule
-  → per-SKU weekend/festival uplift
-  → data/forecast_store/
+  → learn SKU weekend/festival uplift
+  → overwrite data/forecast_store/
 
 Detect-order reads those files (no live retrain per click).
+SKU uplift applied at order time on cover sales (ADS×C).
 ```
 
-Demand preference: local `Product Sales *.csv` → `ai_pos_daily_sales` → live orders.
+Demand preference: local `Product Sales *.csv` → `ai_pos_daily_sales` → live `orders`×`order_items`.  
+On the Azure VM nightly job: `FORECAST_USE_LOCAL_SALES=0` (DB sales).
+
+Deploy units: `deploy/reorder-nightly-forecast.service` + `.timer` · install via `deploy/install-nightly-forecast.sh`.
 
 ---
 
@@ -107,14 +132,15 @@ Demand preference: local `Product Sales *.csv` → `ai_pos_daily_sales` → live
 
 | Path | Role |
 |------|------|
-| `api/services/reorder_engine.py` | ADS / SS / ROP / AI target / cases |
-| `api/services/detect_order_service.py` | Detect-order orchestration |
+| `api/services/reorder_engine.py` | ADS / SS / ROP / cover / cases / actions |
+| `api/services/detect_order_service.py` | Detect-order orchestration + justification |
+| `api/repositories/forecast_store.py` | Read batch P50/P90 + live ADS (no invent from P50) |
 | `api/services/order_export.py` | Excel export |
-| `demo_app/streamlit_app.py` | Streamlit demo |
-| `v2/forecasting/` | Classification, Croston/TSB, LightGBM, uplift |
+| `demo_app/streamlit_app.py` | Streamlit demo (blue theme) |
+| `v2/forecasting/` | Classification, Croston/TSB, LightGBM, festivals, uplift |
 | `scripts/run_nightly_forecast.py` | Nightly batch |
 | `scripts/import_local_to_paul.py` | Inventory + vendor map + sales → tenant |
-| `docs/EXAMPLE.md` | AASHIRVAAD ATTA worked example |
+| `deploy/` | VM systemd timer + TL handoff |
 
 Local `data/` dumps are **not** committed.
 
@@ -128,11 +154,11 @@ DETECT_ORDER_USE_LIVE_SQL=1
 FORECAST_STORE_USE_BATCH=1
 FORECAST_STORE_USE_LIVE_SQL=1
 ADS_LOOKBACK_DAYS=90
-FORECAST_USE_LOCAL_SALES=auto
+FORECAST_USE_LOCAL_SALES=0          # VM: live DB; laptop may use auto/local CSVs
 FORECAST_LOOKBACK_DAYS=0
 SKU_UPLIFT_ENABLED=1
 UPLIFT_ENABLED=0
-OPENAI_API_KEY=
+REORDER_TZ=America/Detroit
 ```
 
 ---
@@ -141,4 +167,5 @@ OPENAI_API_KEY=
 
 ```bash
 pytest -q
+# contract: tests/test_reorder_math_contract.py
 ```

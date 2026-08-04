@@ -1,6 +1,6 @@
-# Detect Order — precise workflow
+# Detect Order — precise workflow (current)
 
-Worked numbers: see [`EXAMPLE.md`](EXAMPLE.md) (AASHIRVAAD ATTA 10 LB, L=3, C=14).
+Worked numbers: [`EXAMPLE.md`](EXAMPLE.md).
 
 ## Inputs (every request)
 
@@ -9,37 +9,48 @@ Worked numbers: see [`EXAMPLE.md`](EXAMPLE.md) (AASHIRVAAD ATTA 10 LB, L=3, C=14
 | `vendor_id` / `vendor_name` | Which supplier catalog to order from |
 | `lead_time_days` (**L**) | Days until the truck arrives (stock keeps selling) |
 | `time_to_cover_days` (**C**) | Days of stock wanted **after** arrival |
-| Window **X** | **X = L + C** only — no extra days are added |
+| Window **X** | **X = L + C** only |
+| `include_zero_orders` | If false (default): return ORDER + WATCH only |
 
 ## What the API reads
 
 | Source | Use |
 |--------|-----|
-| `product_vendor` + `products` | Vendor catalog SKUs |
-| `product_locations` | On-hand (negative treated as 0) |
-| `ai_pos_daily_sales` / local sales | **ADS** + demand std (**90-day** lookback by default) |
-| `data/forecast_store/` | Nightly ML **P50 / P90** (scaled to X) |
-| SKU uplift table | Weekend / festival multiplier on P50/P90 |
-| Past invoices / vendor POs | `last_pallet_qty` reference only (not order math) |
+| `vendors` | Vendor list / detect |
+| `product_vendor` + `products` + `product_barcodes` | Vendor catalog SKUs + pack |
+| `product_locations` | On-hand (negatives → 0 for ordering; oversell counted into ADS) |
+| `ai_pos_daily_sales` / local sales | **ADS** + demand std (**90-day** lookback) — **never invent ADS from P50** |
+| `data/forecast_store/` | Nightly ML **P50 / P90** (reference only) |
+| SKU uplift table | Weekend / festival multiplier on **cover sales** (ADS×C) at order time |
+| Festival calendar (`festival_calendar.py`) | Tags in next X days (`as_of` = `REORDER_TZ`, default America/Detroit) |
+| `product_batches` | Expiry cap when remaining shelf life &lt; X |
+| Past invoices / `vendor_order_products` | `last_pallet_qty` reference only |
 
 ## Per-SKU math (exact order)
 
 ```text
-1. ADS          = units_sold_last_90d / 90
-2. lead_demand  = ADS × L
-3. cover_demand = ADS × C
-4. SS_lead      = Z × σ × √L          (Z≈1.65 @ 95%)
-5. ROP          = ADS × L + SS_lead   → below_ROP = (on_hand < ROP)
-6. ads_cover    = ADS × X + SS_X      (SS_X uses √X)
-7. P50_X, P90_X = batch forecast for X  (× uplift if any)
-8. AI_target    = max(P90_X, ads_cover)
-9. raw_need     = max(0, AI_target − on_hand)
-10. qty_to_order = pack-round(raw_need)
-                 (full case only if raw_need ≥ 80% of pack)
+1. ADS            = units_sold_last_90d / 90
+                  (0 if no sales — do NOT use P50/horizon as ADS)
+2. ads_times_x    = ADS × X                         (audit column)
+3. lead_demand    = ADS × L
+4. SS(L)          = Z × σ × √L                      (Z≈1.65 @ 95%)
+5. ROP            = ADS × L + SS(L)
+                  below_ROP = (on_hand < ROP)       → urgency / WATCH
+6. stock_at_arrival = max(0, on_hand − ADS×L)
+7. cover_eff      ≈ C  (or effective_days − L if expiry-capped)
+8. SS(C)          = Z × σ × √cover_eff
+9. Desired        = ceil(ADS × cover_eff × uplift + SS(C))
+10. raw_need      = max(0, Desired − stock_at_arrival)
+11. qty_to_order  = ceil(raw_need / pack) × pack    (full cases only)
+12. If ADS≈0      → SKIP, qty=0 (dead stock)
+13. line_action   = ORDER | WATCH | SKIP
+14. justification = report-style template from outputs (no GPT)
 ```
 
-**Important:** `below_reorder_point` is a **lead-time flag**.  
-Order quantity is driven by **AI_target for X = L+C**, not by ROP alone.
+**Important**
+- ROP does **not** set order qty; cover after arrival does.
+- ML P50/P90 are shown for comparison only.
+- Festival uplift multiplies **cover sales**, not SS.
 
 ## Endpoints
 
@@ -53,9 +64,9 @@ Order quantity is driven by **AI_target for X = L+C**, not by ROP alone.
 ## Demo UI
 
 ```bash
-python -m uvicorn api.main:app --host 127.0.0.1 --port 8001
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 python -m streamlit run demo_app/streamlit_app.py --server.port 8501
-# or: run_demo.bat  (expects API on 8001)
+# Default API base in UI: http://74.249.36.238:8000
 ```
 
 ## Forecast batch (must be current)
@@ -64,5 +75,6 @@ python -m streamlit run demo_app/streamlit_app.py --server.port 8501
 python scripts/run_nightly_forecast.py --lookback-days 0
 ```
 
-Writes classifications + P50/P90 + SKU uplift into `data/forecast_store/`.  
+On Azure VM: **systemd timer** `reorder-nightly-forecast.timer` at **02:00 America/Detroit**.  
+Writes classifications + P50/P90 + SKU uplift into `data/forecast_store/` (overwrites previous).  
 Detect-order **reads** those files; it does not retrain per click.

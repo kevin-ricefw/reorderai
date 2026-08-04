@@ -1,150 +1,92 @@
-# Reorder example — AASHIRVAAD ATTA 10 LB
+# Reorder example — cover-C math (illustrative)
 
-Worked example for **one SKU** so the field meanings and formulas are clear.
+One SKU walkthrough with the **current** formulas (cover after arrival, full cases, ADS from sales only).
 
 ## Inputs
 
 | Input | Value |
 |--------|--------|
-| Product | AASHIRVAAD ATTA 10 LB |
-| UPC | 841905080021 |
-| Vendor catalog pack | 4 units / case |
-| Lead time **L** | 3 days (truck wait) |
-| Days to cover **C** | 14 days (stock after arrival) |
+| Product | Example intermittent SKU |
+| Pack | 4 units / case |
+| Lead time **L** | 3 days |
+| Days to cover **C** | 14 days |
 | Planning window **X** | **L + C = 17 days** |
 | On-hand | 5 units |
+| Units sold last 90d | 32 |
+| Selling days | 8 of 90 (rest zero-sale) |
 | Demand class | intermittent |
-| Last invoice qty (reference) | 8 |
+| Uplift | 1.0 (no festival lift for this SKU) |
 
-ADS lookback = **90 days** (`ADS_LOOKBACK_DAYS`).
+## Step-by-step
+
+### 1) ADS (sales only)
+
+```text
+ADS = 32 / 90 = 0.3556 units/day
+```
+
+If sold units = 0 → ADS = 0 → **SKIP** (even if ML P50 is large).  
+Never set ADS = P50 / horizon.
+
+### 2) ADS × X (audit)
+
+```text
+ads_times_x = 0.3556 × 17 ≈ 6.04
+```
+
+### 3) Lead burn + ROP (urgency only)
+
+```text
+lead_demand = ADS × L = 0.3556 × 3 ≈ 1.07
+SS(L)       ≈ Z × σ × √L
+ROP         = lead_demand + SS(L)
+stock_at_arrival = max(0, 5 − 1.07) ≈ 3.93
+below_ROP   = (5 < ROP)   → depends on σ
+```
+
+### 4) Cover after arrival (sets desired stock)
+
+```text
+cover_demand = ADS × C = 0.3556 × 14 ≈ 4.98
+SS(C)        ≈ Z × σ × √C
+Desired      = ceil(ADS×C×uplift + SS(C))
+             = ceil(4.98×1.0 + SS(C))
+```
+
+### 5) Order qty — full cases
+
+```text
+raw_need     = max(0, Desired − stock_at_arrival)
+cases        = ceil(raw_need / pack)
+qty_to_order = cases × pack
+```
+
+### 6) Action
+
+| Condition | Action |
+|-----------|--------|
+| qty &gt; 0 | **ORDER** |
+| below ROP but raw_need = 0 | **WATCH** |
+| ADS≈0 or already covered | **SKIP** |
+
+### 7) Festivals (next X days)
+
+Calendar scanned from `as_of` (`REORDER_TZ=America/Detroit`).  
+Listed in justification / `upcoming_festivals`.  
+Raises Desired only if this SKU has a learned uplift for those tags.
+
+### 8) ML reference (does not set qty)
+
+P50/P90 for X are shown for comparison only.
 
 ---
 
-## Step-by-step numbers
+## Dead-stock counterexample (why we fixed invent-from-P50)
 
-### 1) ADS (average daily sales)
-
-```text
-ADS = (units sold in last 90 days) / 90
-    = 0.3556 units/day
-```
-
-### 2) Lead demand (sells before truck arrives)
-
-```text
-lead_demand_ads = ADS × L
-                = 0.3556 × 3
-                = 1.0667 units
-```
-
-### 3) Cover demand (wanted after arrival)
-
-```text
-cover_demand_ads = ADS × C
-                 = 0.3556 × 14
-                 = 4.9778 units
-```
-
-### 4) Safety stock and reorder point (lead only)
-
-```text
-SS  = Z × σ × √L          (service level ~95%, Z ≈ 1.65)
-    = 1.61
-
-ROP = ADS × L + SS
-    = 1.0667 + 1.61
-    = 2.68
-```
-
-**Below reorder point?**  
-`on-hand < ROP` → `5 < 2.68` → **FALSE**.
-
-ROP is only a **lead-time urgency flag**. It does **not** decide whether to order for the full cover window.
-
-### 5) Classic full-window need (ADS cover)
-
-Safety for the full window X:
-
-```text
-SS_X = Z × σ × √X
-ads_cover_qty = ADS × X + SS_X
-              = 0.3556 × 17 + SS_X
-              = 9.88
-```
-
-### 6) ML demand for X (with uplift)
-
-Nightly batch forecast for ~17 days (nearest stored horizon, scaled to X):
-
-| Field | Value |
-|--------|--------|
-| P50 | 4.86 |
-| P90 | 7.29 |
-| Uplift multiplier | 1.0 (no weekend/festival lift this window) |
-
-### 7) AI target (order-up-to)
-
-```text
-AI target = max(P90 × uplift, ads_cover_qty)
-          = max(7.29, 9.88)
-          = 9.88
-```
-
-ADS cover won over P90 for this SKU.
-
-### 8) Quantity to order
-
-```text
-raw need     = max(0, AI target − on-hand)
-             = max(0, 9.88 − 5)
-             = 4.88
-
-pack         = 4
-case rule    = recommend a case only if raw need ≥ 80% of pack
-             → 4.88 ≥ 0.80 × 4 → yes → 1 case
-
-qty_to_order = 4
-cases        = 1
-```
-
----
-
-## Why order if Below ROP is FALSE?
-
-| Question | Answer for this SKU |
-|----------|---------------------|
-| Will stock run out during **3 lead days**? | No — on-hand 5 > ROP 2.68 → `below_reorder_point = FALSE` |
-| Is on-hand enough for **17 days (L+C)**? | No — need ~9.88, have 5 → **order 4** |
-
-So the line is recommended because of the **full cover window**, not because it failed the ROP check.
-
-```text
-Below ROP  → urgency for lead time only
-Order qty  → fill up to AI target for X = L + C
-```
-
----
-
-## Field cheat-sheet (same row as Excel / API)
-
-| Field | Example value |
-|--------|----------------|
-| available_stock | 5 |
-| ads | 0.3556 |
-| lead_demand_ads | 1.0667 |
-| cover_demand_ads | 4.9778 |
-| safety_stock | 1.61 |
-| reorder_point | 2.68 |
-| below_reorder_point | FALSE |
-| ads_cover_qty | 9.88 |
-| uplift_multiplier | 1 |
-| p50_demand | 4.86 |
-| p90_demand | 7.29 |
-| ai_target_qty | 9.88 |
-| qty_to_order | 4 |
-| cases_to_order | 1 |
-| box_qty | 4 |
-| horizon_days (X) | 17 |
-| demand_class | intermittent |
-
-Justification text matches this math: order 4 units (1 case × pack 4) for window L3+C14.
+| Field | Bad (old bug) | Good (current) |
+|-------|----------------|----------------|
+| On hand | 0 | 0 |
+| Real sales / ADS | 0 | 0 |
+| ML P50 for 14d | 148.4 | 148.4 |
+| ADS used | **10.6 invented** (= P50/14) | **0** |
+| Qty | **100 ORDER** | **0 SKIP** |

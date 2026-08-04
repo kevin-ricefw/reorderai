@@ -1,13 +1,16 @@
 # Wecomm Database Architecture — Reorder AI Audit
 
-**Date:** 2026-07-30  
-**Source:** Live Azure Postgres via SSH tunnel (`127.0.0.1:5433`)  
+**Date:** 2026-07-30 (schema audit)  
+**Ops update:** 2026-08-04 — live Paul tenant + current table usage: see [`COMPLETE_SYSTEM_WORKFLOW.md`](COMPLETE_SYSTEM_WORKFLOW.md)  
+**Source:** Live Azure Postgres via SSH tunnel (`127.0.0.1:5433`) or VM → `wecomm.postgres.database.azure.com`  
 **Master DB:** `postgres`  
-**Focus tenant UUID:** `019fafca-fa67-7393-84c4-4ec423f88c15`  
-**Focus tenant schema:** `wecomm_019fafca-fa67-7393-84c4-4ec423f88c15`  
+**Focus tenant UUID (audit-era):** `019fafca-fa67-7393-84c4-4ec423f88c15`  
+**Focus tenant schema (audit-era):** `wecomm_019fafca-fa67-7393-84c4-4ec423f88c15`  
+**Current Paul tenant (prod VM `.env`):** `wecomm_019fc887-24aa-70e9-b85b-7e969082193b`  
 **Secondary tenant schema:** `wecomm_019fb2f7-9d49-7032-bfe9-e20094fa15aa`
 
-> This document does **not** include secrets (tenant DB usernames/passwords are omitted).
+> This document does **not** include secrets (tenant DB usernames/passwords are omitted).  
+> For **which tables Reorder AI uses today** and the end-to-end code flow, prefer [`COMPLETE_SYSTEM_WORKFLOW.md`](COMPLETE_SYSTEM_WORKFLOW.md).
 
 ---
 

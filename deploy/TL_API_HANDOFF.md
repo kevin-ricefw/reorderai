@@ -2,17 +2,16 @@
 
 ## Base URL
 
-After deploy, use the printed URL (example):
-
-`https://<app-name>.azurewebsites.net`
+`http://74.249.36.238:8000`
 
 | Link | Purpose |
 |------|---------|
-| `/docs` | Swagger UI (try endpoints) |
+| `/docs` | Swagger UI |
 | `/api/health` | Liveness |
 | `/api/db-health` | Postgres connectivity |
 | `GET /api/detect-order` | List vendors |
 | `POST /api/detect-order` | Main reorder API |
+| `GET /api/detect-order/runs/{run_id}/export.xlsx` | Excel order sheet |
 
 ## Example request
 
@@ -28,8 +27,20 @@ Content-Type: application/json
 }
 ```
 
-## Notes
+## What the API returns (summary)
 
-- Nightly ML batch is **not** run inside Azure yet — `data/forecast_store/` is packaged at deploy time.
-- Live stock/vendors need Azure Postgres firewall to allow the App Service.
-- API has **no auth** yet — share URL only inside the team, or add API key / Easy Auth later.
+- **Action:** ORDER / WATCH / SKIP  
+- **Qty:** full cases only, sized for cover **C** after lead **L**  
+- **ADS:** from live ~90-day sales (not invented from ML)  
+- **P50/P90:** reference only  
+- **Justification:** plain report from the numbers  
+- **Festivals:** tags in next X = L+C days (Michigan timezone)
+
+## Ops notes
+
+- Host: Azure VM `/opt/reorder-ai`, systemd service `reorder-ai`
+- Nightly forecast: `reorder-nightly-forecast.timer` at **02:00 America/Detroit**
+- Overwrites `data/forecast_store/` each night
+- API has **no auth** yet — share only inside the team
+
+Full workflow: [`docs/COMPLETE_SYSTEM_WORKFLOW.md`](../docs/COMPLETE_SYSTEM_WORKFLOW.md)
