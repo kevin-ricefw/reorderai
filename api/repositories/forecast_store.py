@@ -92,10 +92,17 @@ class ForecastStore:
         return self._batch if not self._batch.empty else None
 
     def _window_sku_uplift(
-        self, keys: list[str], horizon_days: int
+        self,
+        keys: list[str],
+        horizon_days: int,
+        *,
+        allowed_types: list[str] | None = None,
     ) -> tuple[float, str | None]:
         """Max learned SKU uplift across days in the upcoming order window."""
         if not sku_uplift_enabled():
+            return 1.0, None
+        # Explicit empty list → caller disabled all uplift patterns
+        if allowed_types is not None and len(allowed_types) == 0:
             return 1.0, None
         table = self._sku_uplift if self._sku_uplift is not None else load_latest_sku_uplift()
         self._sku_uplift = table
@@ -110,7 +117,12 @@ class ForecastStore:
             if key not in table:
                 continue
             for i in range(max(int(horizon_days), 1)):
-                m, n = sku_multiplier_for_date(key, table, as_of=start + timedelta(days=i))
+                m, n = sku_multiplier_for_date(
+                    key,
+                    table,
+                    as_of=start + timedelta(days=i),
+                    allowed_types=allowed_types,
+                )
                 if m > best:
                     best, best_name = m, n
         return best, best_name
@@ -122,6 +134,7 @@ class ForecastStore:
         horizon_days: int,
         demand_class: str | None = None,
         alt_ids: list[str] | None = None,
+        uplift_types: list[str] | None = None,
     ) -> dict[str, Any]:
         h = nearest_horizon(horizon_days)
         item = str(item_id)
@@ -141,7 +154,9 @@ class ForecastStore:
                 )
                 p50 = float(row["p50"])
                 p90 = float(row["p90"])
-                uplift_m, uplift_rule = self._window_sku_uplift(keys, horizon_days)
+                uplift_m, uplift_rule = self._window_sku_uplift(
+                    keys, horizon_days, allowed_types=uplift_types
+                )
                 if uplift_m > 1.0:
                     p50 = round(p50 * uplift_m, 4)
                     p90 = round(p90 * uplift_m, 4)
@@ -166,7 +181,9 @@ class ForecastStore:
         if self.use_live_ads and self.configured:
             self._mode = "live"
             out = self._live_sales_get(item, h, demand_class=demand_class)
-            uplift_m, uplift_rule = self._window_sku_uplift(keys, horizon_days)
+            uplift_m, uplift_rule = self._window_sku_uplift(
+                keys, horizon_days, allowed_types=uplift_types
+            )
             if uplift_m > 1.0:
                 out["p50"] = round(float(out["p50"]) * uplift_m, 4)
                 out["p90"] = round(float(out["p90"]) * uplift_m, 4)

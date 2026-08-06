@@ -855,7 +855,17 @@ with tab_order:
             if data is not None:
                 vendors = data.get("vendors") or []
                 st.session_state.vendors = vendors
-                st.success(f"Loaded {len(vendors)} vendors")
+                msg = (data.get("message") or "").strip()
+                if vendors:
+                    st.success(f"Loaded {len(vendors)} vendors")
+                else:
+                    st.error(
+                        "Loaded **0 vendors**. "
+                        + (msg or "Check API base URL, DB tunnel, and TENANT_SCHEMA in `.env`.")
+                    )
+                    if msg:
+                        with st.expander("API error details"):
+                            st.code(msg)
     with top[1]:
         st.caption(f"{len(st.session_state.vendors)} vendors in session")
 
@@ -890,10 +900,21 @@ with tab_order:
     with c_x:
         st.metric("Order window X = L + C", f"{int(lead) + int(cover)} days")
 
-    include_zero = st.checkbox(
-        "Include full catalog (SKIP / already covered)",
-        value=False,
-        help="Default shows ORDER + WATCH only. Turn on to audit every SKU.",
+    uplift_pick = st.multiselect(
+        "Uplift patterns (multi-select)",
+        options=["weekend", "festival", "trend"],
+        default=["weekend", "festival"],
+        help=(
+            "Select all, some, or none. "
+            "weekend / festival use learned SKU lifts; trend is reserved (no effect yet)."
+        ),
+    )
+    risk = st.slider(
+        "Risk factor (0–100)",
+        min_value=0,
+        max_value=100,
+        value=50,
+        help="Higher risk → larger safety-stock buffer (0→0.80, 50→0.95, 100→0.99 service level).",
     )
 
     if st.button("Run detect-order", type="primary", use_container_width=True):
@@ -903,7 +924,8 @@ with tab_order:
                 "vendor_name": str(vendor.get("vendor_name")),
                 "lead_time_days": int(lead),
                 "time_to_cover_days": int(cover),
-                "include_zero_orders": bool(include_zero),
+                "uplift_types": list(uplift_pick),
+                "risk_factor": int(risk),
             }
             data = safe_call(_post, "/api/detect-order", body)
             if data is not None:

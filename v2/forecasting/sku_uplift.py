@@ -135,18 +135,45 @@ def learn_sku_uplift_table(daily: pd.DataFrame) -> dict[str, dict[str, float]]:
     return table
 
 
+def _label_allowed(lab: str, allowed: set[str] | None) -> bool:
+    """Filter calendar labels by request uplift_types (weekend / festival / trend)."""
+    if allowed is None:
+        return True
+    if not allowed:
+        return False
+    if lab == "weekend":
+        return "weekend" in allowed
+    # Named festival tags (Diwali, etc.) — not "weekend"
+    if "festival" in allowed:
+        return True
+    # "trend" reserved — no calendar labels yet
+    return False
+
+
 def sku_multiplier_for_date(
     item_id: str,
     table: dict[str, dict[str, float]],
     *,
     as_of: str | date | datetime | None = None,
+    allowed_types: set[str] | list[str] | None = None,
 ) -> tuple[float, str | None]:
     """
     Best (max) applicable learned multiplier for as_of labels.
     Returns (1.0, None) if no selective uplift.
+
+    ``allowed_types``: subset of {weekend, festival, trend}.
+    ``None`` = all types (legacy). Empty set/list = force no uplift.
     """
     if not sku_uplift_enabled() or not table:
         return 1.0, None
+    allowed: set[str] | None
+    if allowed_types is None:
+        allowed = None
+    else:
+        allowed = {str(x).strip().lower() for x in allowed_types if str(x).strip()}
+        if not allowed:
+            return 1.0, None
+
     lifts = table.get(str(item_id))
     if not lifts:
         return 1.0, None
@@ -156,6 +183,8 @@ def sku_multiplier_for_date(
     best = 1.0
     best_name: str | None = None
     for lab in labels:
+        if not _label_allowed(str(lab), allowed):
+            continue
         m = float(lifts.get(lab, 1.0))
         if m > best:
             best = m

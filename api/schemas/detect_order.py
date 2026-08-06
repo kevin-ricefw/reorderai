@@ -6,6 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+# Multi-select uplift patterns the client can enable (Swagger / UI dropdown).
+UpliftType = Literal["weekend", "festival", "trend"]
+
 
 class DetectOrderRequest(BaseModel):
     """
@@ -13,17 +16,31 @@ class DetectOrderRequest(BaseModel):
       - Vendor
       - Lead time (days until delivery)
       - Time to cover (extra days the next pallet should cover)
+      - Which uplift patterns to apply (multi-select; empty = none)
+      - Risk factor 0–100 (scales safety-stock buffer)
     """
 
     vendor_id: str | None = None
     vendor_name: str | None = None
     lead_time_days: int = Field(ge=0, description="Days from order to receipt")
     time_to_cover_days: int = Field(ge=0, description="Extra days of cover beyond lead time")
-    include_zero_orders: bool = Field(
-        default=False,
+    uplift_types: list[UpliftType] = Field(
+        default_factory=lambda: ["weekend", "festival"],
         description=(
-            "If false (default): return ORDER + WATCH lines only (actionable list). "
-            "If true: include full catalog including SKIP (dead stock / already covered)."
+            "Multi-select uplift patterns to apply for this run. "
+            "Allowed: weekend, festival, trend. "
+            "Select all, some, or [] for none (multiplier stays 1.0). "
+            "trend is reserved (no effect until trend uplift is trained)."
+        ),
+        examples=[["weekend", "festival"], ["weekend"], []],
+    )
+    risk_factor: int = Field(
+        default=50,
+        ge=0,
+        le=100,
+        description=(
+            "Risk level 0–100. Higher → larger safety-stock buffer "
+            "(service level: 0→0.80, 50→0.95, 100→0.99)."
         ),
     )
     generate_justification: bool = Field(
@@ -162,6 +179,14 @@ class DetectOrderResponse(BaseModel):
     lead_time_days: int = 0
     time_to_cover_days: int = 0
     x_days: int = Field(0, description="Lead Time + Time to Cover")
+    uplift_types: list[UpliftType] = Field(
+        default_factory=list,
+        description="Uplift patterns enabled for this run (from request)",
+    )
+    risk_factor: int = Field(50, description="Risk 0–100 used for this run")
+    service_level: float = Field(
+        0.95, description="Service level derived from risk_factor for safety stock"
+    )
     as_of_date: str = Field(
         "",
         description=(

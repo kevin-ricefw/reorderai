@@ -2,7 +2,7 @@
 W-1 Detect Order API (design doc §5.3).
 
 POST /api/detect-order
-  I/P: vendor, lead_time_days, time_to_cover_days
+  I/P: vendor, lead_time_days, time_to_cover_days, uplift_types, risk_factor
   O/P: items to order, stock + projected stock, justification, run_id
 
 GET  /api/detect-order            → vendor list (pass no vendor)
@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
-from api.schemas.detect_order import DetectOrderRequest, DetectOrderResponse
+from api.schemas.detect_order import DetectOrderRequest, DetectOrderResponse, UpliftType
 from api.services import detect_order_service
 from api.services.order_export import order_run_to_excel_bytes
 
@@ -31,7 +31,11 @@ def detect_order_get(
     vendor_name: str | None = Query(default=None),
     lead_time_days: int = Query(default=5, ge=0),
     time_to_cover_days: int = Query(default=7, ge=0),
-    include_zero_orders: bool = Query(default=False),
+    uplift_types: list[UpliftType] | None = Query(
+        default=None,
+        description="Multi-select: weekend, festival, trend. Omit = weekend+festival. Empty = none.",
+    ),
+    risk_factor: int = Query(default=50, ge=0, le=100),
     generate_justification: bool = Query(
         default=True,
         description="Ignored — justification always uses the report-style template (no GPT).",
@@ -44,7 +48,8 @@ def detect_order_get(
             vendor_name=vendor_name,
             lead_time_days=lead_time_days,
             time_to_cover_days=time_to_cover_days,
-            include_zero_orders=include_zero_orders,
+            uplift_types=uplift_types if uplift_types is not None else ["weekend", "festival"],
+            risk_factor=risk_factor,
             generate_justification=generate_justification,
         )
     )
@@ -55,9 +60,8 @@ def detect_order_get(
     response_model=DetectOrderResponse,
     summary="Detect order for vendor (W-1)",
     description=(
-        "Steps: fetch items → fetch stock → read P90 forecast for X=L+C → "
-        "order = P90 − available → expiry cap + box round → justification. "
-        "Saves run_id for chatbot."
+        "Inputs: vendor + L + C + optional uplift_types (multi-select) + risk_factor (0–100). "
+        "Returns ORDER/WATCH lines sized for cover C after lead L. Saves run_id for chatbot."
     ),
 )
 def detect_order_post(body: DetectOrderRequest) -> DetectOrderResponse:

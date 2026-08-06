@@ -35,6 +35,14 @@ def _ads_lookback_days() -> float:
         return 90.0
 
 
+def risk_to_service_level(risk_factor: int) -> float:
+    """Map risk 0–100 → service level (0→0.80, 50→0.95, 100→0.99)."""
+    r = max(0, min(100, int(risk_factor)))
+    if r <= 50:
+        return round(0.80 + 0.15 * (r / 50.0), 4)
+    return round(0.95 + 0.04 * ((r - 50) / 50.0), 4)
+
+
 def _vendors(repo: DetectOrderRepository) -> list[VendorInfo]:
     return [
         VendorInfo(vendor_id=str(v["vendor_id"]), vendor_name=str(v["vendor_name"]))
@@ -230,6 +238,8 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             f"{upcoming_festivals}; {weekend_note}" if upcoming_festivals else weekend_note
         )
 
+    uplift_types = list(req.uplift_types or [])
+    service_level = risk_to_service_level(int(req.risk_factor))
     lines: list[DetectOrderItem] = []
 
     for it in raw_items:
@@ -252,6 +262,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             horizon_days=x_days,
             demand_class=str(demand_class) if demand_class else None,
             alt_ids=alt_ids,
+            uplift_types=uplift_types,
         )
         if demand_class is None and fc.get("demand_class"):
             demand_class = fc.get("demand_class")
@@ -325,6 +336,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             box_qty=box_qty,
             effective_days=effective_days,
             uplift_multiplier=uplift_m,
+            service_level=service_level,
             wecomm_max_on_hand=wecomm_max,
         )
         if calc.get("skip_dead_stock"):
@@ -454,8 +466,8 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
 
     order_lines = [x for x in lines if x.qty_to_order > 0]
     watch_lines = [x for x in lines if x.line_action == "WATCH"]
-    actionable = [x for x in lines if x.line_action in ("ORDER", "WATCH")]
-    out_items = lines if req.include_zero_orders else actionable
+    # Always return actionable lines only (ORDER + WATCH). SKIP / zero lines omitted.
+    out_items = [x for x in lines if x.line_action in ("ORDER", "WATCH")]
     total_units = round(sum(x.qty_to_order for x in order_lines), 2)
     total_cases = round(sum(x.cases_to_order for x in order_lines), 2)
 
@@ -468,6 +480,9 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         lead_time_days=lead,
         time_to_cover_days=cover,
         x_days=x_days,
+        uplift_types=list(uplift_types),  # type: ignore[arg-type]
+        risk_factor=int(req.risk_factor),
+        service_level=float(service_level),
         as_of_date=as_of_s,
         upcoming_festivals=upcoming_festivals,
         catalog_item_count=len(lines),

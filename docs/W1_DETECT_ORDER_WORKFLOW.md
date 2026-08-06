@@ -10,7 +10,8 @@ Worked numbers: [`EXAMPLE.md`](EXAMPLE.md).
 | `lead_time_days` (**L**) | Days until the truck arrives (stock keeps selling) |
 | `time_to_cover_days` (**C**) | Days of stock wanted **after** arrival |
 | Window **X** | **X = L + C** only |
-| `include_zero_orders` | If false (default): return ORDER + WATCH only |
+| `uplift_types` | Multi-select: `weekend`, `festival`, `trend` (empty = none) |
+| `risk_factor` | 0–100 → safety-stock service level (50 ≈ 0.95) |
 
 ## What the API reads
 

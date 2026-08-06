@@ -23,7 +23,8 @@ Content-Type: application/json
   "vendor_id": "18",
   "lead_time_days": 3,
   "time_to_cover_days": 14,
-  "include_zero_orders": false
+  "uplift_types": ["weekend", "festival"],
+  "risk_factor": 50
 }
 ```
 
