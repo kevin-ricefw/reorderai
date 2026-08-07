@@ -187,6 +187,7 @@ class DetectOrderRepository:
                     "sku": str(r.sku) if r.sku is not None else None,
                     "description": str(r.description or ""),
                     "vendor_id": str(int(r.vendor_id)),
+                    "vendor_price": float(r.vendor_price) if r.vendor_price is not None else None,
                     "demand_class": None,
                     "box_qty": max(int(r.box_qty or 1), 1),
                     "expiration_days_remaining": expiry_map.get(iid),

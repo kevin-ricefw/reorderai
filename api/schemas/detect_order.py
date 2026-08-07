@@ -64,6 +64,7 @@ class DetectOrderItem(BaseModel):
     sku: str | None = None
     description: str
     vendor_id: str
+    vendor_price: float | None = Field(None, description="Vendor's price for this item (product_vendor.price)")
 
     demand_class: str | None = None
     forecast_source: str | None = None
