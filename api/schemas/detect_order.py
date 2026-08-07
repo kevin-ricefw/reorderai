@@ -58,6 +58,12 @@ class VendorInfo(BaseModel):
     detected: bool = True
 
 
+class VendorPriceOffer(BaseModel):
+    vendor_id: str
+    vendor_name: str
+    price: float
+
+
 class DetectOrderItem(BaseModel):
     item_id: str
     upc: str | None = None
@@ -65,6 +71,16 @@ class DetectOrderItem(BaseModel):
     description: str
     vendor_id: str
     vendor_price: float | None = Field(None, description="Vendor's price for this item (product_vendor.price)")
+    other_vendor_prices: list[VendorPriceOffer] = Field(
+        default_factory=list,
+        description="All other vendors selling this product (product_vendor), for price comparison",
+    )
+    cheaper_elsewhere: bool = Field(
+        False, description="True if another vendor sells this item for less than vendor_price"
+    )
+    cheapest_vendor: VendorPriceOffer | None = Field(
+        None, description="Lowest-price offer among other vendors, only set when cheaper_elsewhere"
+    )
 
     demand_class: str | None = None
     forecast_source: str | None = None

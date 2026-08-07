@@ -224,6 +224,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
 
     item_ids = [str(it["item_id"]) for it in raw_items]
     available_map = repo.fetch_available_stock(item_ids)
+    other_vendor_prices = repo.fetch_all_vendor_prices(item_ids)
     # Warm ADS/std once for the whole catalog
     demand_stats = store.get_demand_stats(item_ids)
 
@@ -382,13 +383,28 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
                         round(qty_box / pack, 2) if pack > 1 and qty_box > 0 else qty_box
                     )
 
+        vendor_price = float(it["vendor_price"]) if it.get("vendor_price") is not None else None
+        offers = [o for o in other_vendor_prices.get(item_id, []) if o["vendor_id"] != vendor_id]
+        cheaper_offers = (
+            [o for o in offers if o["price"] < vendor_price] if vendor_price is not None else []
+        )
+        cheapest_offer = min(cheaper_offers, key=lambda o: o["price"], default=None)
+        if cheapest_offer:
+            notes.append(
+                f"Cheaper elsewhere: {cheapest_offer['vendor_name']} @ ${cheapest_offer['price']:.2f} "
+                f"vs ${vendor_price:.2f} here."
+            )
+
         item = DetectOrderItem(
             item_id=item_id,
             upc=it.get("upc"),
             sku=it.get("sku"),
             description=str(it.get("description") or ""),
             vendor_id=vendor_id,
-            vendor_price=float(it["vendor_price"]) if it.get("vendor_price") is not None else None,
+            vendor_price=vendor_price,
+            other_vendor_prices=offers,
+            cheaper_elsewhere=bool(cheapest_offer),
+            cheapest_vendor=cheapest_offer,
             demand_class=str(demand_class) if demand_class else None,
             forecast_source=str(fc.get("source") or ""),
             available_stock=raw_on_hand,
