@@ -40,7 +40,7 @@ class DetectOrderRequest(BaseModel):
         le=100,
         description=(
             "Risk level 0–100. Higher → larger safety-stock buffer "
-            "(service level: 0→0.80, 50→0.95, 100→0.99)."
+            "(target percentile: 0→P50, 50→P75, 100→P100, capped at P99.9)."
         ),
     )
     generate_justification: bool = Field(
@@ -202,7 +202,7 @@ class DetectOrderResponse(BaseModel):
     )
     risk_factor: int = Field(50, description="Risk 0–100 used for this run")
     service_level: float = Field(
-        0.95, description="Service level derived from risk_factor for safety stock"
+        0.95, description="Target percentile derived from risk_factor (e.g. 0.75 = P75), used for safety stock"
     )
     as_of_date: str = Field(
         "",

@@ -36,11 +36,14 @@ def _ads_lookback_days() -> float:
 
 
 def risk_to_service_level(risk_factor: int) -> float:
-    """Map risk 0–100 → service level (0→0.80, 50→0.95, 100→0.99)."""
+    """Map risk 0-100 -> target percentile: 0->P50, 50->P75, 100->P100.
+
+    P100 needs infinite safety stock under a normal model, so it's capped at
+    P99.9 (see calculate_safety_stock).
+    """
     r = max(0, min(100, int(risk_factor)))
-    if r <= 50:
-        return round(0.80 + 0.15 * (r / 50.0), 4)
-    return round(0.95 + 0.04 * ((r - 50) / 50.0), 4)
+    percentile = min(50.0 + r / 2.0, 99.9)
+    return round(percentile / 100.0, 4)
 
 
 def _vendors(repo: DetectOrderRepository) -> list[VendorInfo]:
@@ -322,6 +325,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
                 f"(requested X={x_days}d = L{lead}+C{cover})."
             )
 
+        wecomm_min = float(it.get("wecomm_min_on_hand") or 0.0)
         wecomm_max = float(it.get("wecomm_max_on_hand") or 0.0)
 
         calc = compute_line_reorder(
@@ -338,6 +342,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             effective_days=effective_days,
             uplift_multiplier=uplift_m,
             service_level=service_level,
+            wecomm_min_on_hand=wecomm_min,
             wecomm_max_on_hand=wecomm_max,
         )
         if calc.get("skip_dead_stock"):
