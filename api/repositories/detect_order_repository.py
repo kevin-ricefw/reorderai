@@ -316,6 +316,42 @@ class DetectOrderRepository:
             if r.quantity is not None
         }
 
+    def fetch_all_vendor_prices(self, item_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """All vendor offers (vendor_id, vendor_name, price) per product_id — for the
+        'cheaper by other vendor' flag. Keyed by item_id (str)."""
+        if not self.live or not item_ids:
+            return {}
+
+        sch = q_ident(self.schema)
+        ids = [int(x) for x in item_ids]
+        id_csv = ",".join(str(i) for i in ids)
+        df = self._conn().read_sql(
+            f"""
+            SELECT
+              pv.product_id,
+              pv.vendor_id,
+              v.name AS vendor_name,
+              COALESCE(pv.price, p.purchase_price, p.price) AS price
+            FROM {sch}.product_vendor pv
+            JOIN {sch}.vendors v ON v.id = pv.vendor_id AND v.deleted_at IS NULL
+            JOIN {sch}.products p ON p.id = pv.product_id
+            WHERE pv.product_id IN ({id_csv})
+            """
+        )
+        out: dict[str, list[dict[str, Any]]] = {}
+        for r in df.itertuples(index=False):
+            if r.price is None:
+                continue
+            pid = str(int(r.product_id))
+            out.setdefault(pid, []).append(
+                {
+                    "vendor_id": str(int(r.vendor_id)),
+                    "vendor_name": str(r.vendor_name),
+                    "price": float(r.price),
+                }
+            )
+        return out
+
     def fetch_available_stock(self, item_ids: list[str]) -> dict[str, float]:
         """Step 2 — sum on-hand qty from product_locations (raw; negatives allowed).
 
