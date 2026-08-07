@@ -388,6 +388,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             sku=it.get("sku"),
             description=str(it.get("description") or ""),
             vendor_id=vendor_id,
+            vendor_price=float(it["vendor_price"]) if it.get("vendor_price") is not None else None,
             demand_class=str(demand_class) if demand_class else None,
             forecast_source=str(fc.get("source") or ""),
             available_stock=raw_on_hand,

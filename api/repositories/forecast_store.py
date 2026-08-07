@@ -27,7 +27,7 @@ from v2.forecasting.local_pos_sales import normalize_upc
 from v2.forecasting.sku_uplift import sku_multiplier_for_date, sku_uplift_enabled
 
 # ADS / demand_std window for ROP, safety stock, ADS cover (longer = more stable).
-SALES_LOOKBACK_DAYS = int(os.getenv("ADS_LOOKBACK_DAYS", "90"))
+SALES_LOOKBACK_DAYS = int(os.getenv("ADS_LOOKBACK_DAYS", "1500"))
 
 
 def _lookup_keys(item_id: str, alt_ids: list[str] | None = None) -> list[str]:
