@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import numpy as np
+import math
+from statistics import NormalDist
 
 
 def calculate_safety_stock(
@@ -14,13 +15,16 @@ def calculate_safety_stock(
     """
     Calculate safety stock using lead-time demand variability.
 
-    SS = Z × σ_demand × √lead_time
+    SS = Z × σ_demand × √lead_time, where Z is the inverse-normal-CDF value
+    for the requested service_level (e.g. 0.95 → Z≈1.65, 0.75 → Z≈0.67).
     """
     if average_daily_demand <= 0:
         return 0.0
 
-    z_scores = {0.90: 1.28, 0.95: 1.65, 0.99: 2.33}
-    z = z_scores.get(service_level, 1.65)
+    # P50 (service_level<=0.5) needs no buffer; cap below 1.0 since P100 is
+    # a mathematically infinite Z-score under a normal model.
+    p = min(max(float(service_level), 0.5), 0.999)
+    z = NormalDist().inv_cdf(p) if p > 0.5 else 0.0
     std = demand_std if demand_std > 0 else average_daily_demand * 0.3
     lt = max(lead_time_days, 1)
-    return round(z * std * np.sqrt(lt), 2)
+    return round(z * std * math.sqrt(lt), 2)

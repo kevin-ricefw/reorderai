@@ -151,7 +151,7 @@ def compute_line_reorder(
     std_f = _capped_demand_std(ads_f, std_raw)
     uplift = max(float(uplift_multiplier or 1.0), 0.0)
     on_hand = max(float(available), 0.0)
-    del wecomm_min_on_hand  # min on hand removed from ordering
+    wecomm_min = max(float(wecomm_min_on_hand or 0.0), 0.0)
     wecomm_max = max(float(wecomm_max_on_hand or 0.0), 0.0)
 
     # --- ROP (trigger only) ---
@@ -224,7 +224,10 @@ def compute_line_reorder(
         cover_demand_p90 = 0.0
         cover_demand_ads = 0.0
 
-    below_rop = bool(on_hand < rop) if rop > 0 else bool(on_hand <= 0 and ai_target > 0)
+    below_min = wecomm_min > 0 and on_hand < wecomm_min
+    below_rop = below_min or (
+        bool(on_hand < rop) if rop > 0 else bool(on_hand <= 0 and ai_target > 0)
+    )
 
     raw_need = 0.0 if skip_dead else max(0.0, desired - stock_at_arrival)
     qty_units, cases = _round_up_full_cases(raw_need, pack)
@@ -248,7 +251,7 @@ def compute_line_reorder(
         rop=float(rop),
         below_rop=below_rop,
         qty=qty_units,
-        wecomm_min=0.0,
+        wecomm_min=wecomm_min,
         skip_dead=skip_dead,
     )
     action = _line_action(
@@ -267,11 +270,11 @@ def compute_line_reorder(
         "safety_stock_cover": float(ss_c),
         "reorder_point": float(rop),
         "below_reorder_point": bool(below_rop),
-        "wecomm_min_on_hand": 0.0,
+        "wecomm_min_on_hand": round(wecomm_min, 2),
         "wecomm_max_on_hand": round(wecomm_max, 2),
-        "min_on_hand": 0.0,
-        "min_on_hand_source": "none",
-        "below_min_on_hand": False,
+        "min_on_hand": round(wecomm_min, 2),
+        "min_on_hand_source": "wecomm" if wecomm_min > 0 else "none",
+        "below_min_on_hand": bool(below_min),
         "min_raised_target": False,
         "max_capped_target": bool(max_capped),
         "lead_demand_ads": float(lead_demand_ads),

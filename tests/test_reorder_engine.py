@@ -46,11 +46,18 @@ def test_rop_not_used_as_min_floor():
     assert out["desired_stock"] == out["ai_target_qty"]
 
 
-def test_wecomm_min_ignored():
+def test_wecomm_min_does_not_change_order_qty():
     base = _base()
     with_min = _base(wecomm_min_on_hand=50.0)
     assert with_min["desired_stock"] == base["desired_stock"]
-    assert with_min["min_on_hand"] == 0.0
+    assert with_min["min_on_hand"] == 50.0
+
+
+def test_wecomm_min_triggers_below_rop():
+    # OH sits above ROP but below the Wecomm min floor → still flagged.
+    out = _base(available=1.0, wecomm_min_on_hand=50.0)
+    assert out["below_reorder_point"] is True
+    assert out["below_min_on_hand"] is True
 
 
 def test_full_cases_never_fractional():

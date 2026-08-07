@@ -387,7 +387,7 @@ class DetectOrderRepository:
         return {i: float(found.get(i, 0.0)) for i in item_ids}
 
     def _fetch_location_min_quantity(self, item_ids: list[int]) -> dict[str, float]:
-        """Max location min_quantity per product (Wecomm shelf/warehouse min)."""
+        """Sum of location min_quantity per product across all locations (Wecomm shelf/warehouse min)."""
         if not item_ids:
             return {}
         sch = q_ident(self.schema)
@@ -395,7 +395,7 @@ class DetectOrderRepository:
         try:
             df = self._conn().read_sql(
                 f"""
-                SELECT product_id, COALESCE(MAX(min_quantity), 0) AS min_qty
+                SELECT product_id, COALESCE(SUM(min_quantity), 0) AS min_qty
                 FROM {sch}.product_locations
                 WHERE deleted_at IS NULL
                   AND product_id IN ({id_csv})
@@ -411,7 +411,7 @@ class DetectOrderRepository:
         }
 
     def _fetch_location_max_quantity(self, item_ids: list[int]) -> dict[str, float]:
-        """Min positive location max_quantity per product (anti-overstock cap)."""
+        """Sum of location max_quantity per product across all locations (anti-overstock cap)."""
         if not item_ids:
             return {}
         sch = q_ident(self.schema)
@@ -419,7 +419,7 @@ class DetectOrderRepository:
         try:
             df = self._conn().read_sql(
                 f"""
-                SELECT product_id, MIN(max_quantity) AS max_qty
+                SELECT product_id, SUM(max_quantity) AS max_qty
                 FROM {sch}.product_locations
                 WHERE deleted_at IS NULL
                   AND product_id IN ({id_csv})
