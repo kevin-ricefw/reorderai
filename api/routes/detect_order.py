@@ -27,6 +27,9 @@ router = APIRouter(prefix="/api/detect-order", tags=["detect-order"])
     summary="List vendors or run detect-order via query params",
 )
 def detect_order_get(
+    tenant_id: str | None = Query(
+        default=None, description="Tenant schema override (wecomm_<uuid>); omit for server default."
+    ),
     vendor_id: str | None = Query(default=None),
     vendor_name: str | None = Query(default=None),
     lead_time_days: int = Query(default=5, ge=0),
@@ -44,6 +47,7 @@ def detect_order_get(
     # sync def → FastAPI runs in threadpool (won't block other requests)
     return detect_order_service.detect_order(
         DetectOrderRequest(
+            tenant_id=tenant_id,
             vendor_id=vendor_id,
             vendor_name=vendor_name,
             lead_time_days=lead_time_days,

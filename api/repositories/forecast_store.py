@@ -58,17 +58,18 @@ def _truthy(name: str, default: str = "1") -> bool:
 
 
 class ForecastStore:
-    def __init__(self) -> None:
+    def __init__(self, tenant_id: str | None = None) -> None:
         self.configured = bool(os.getenv("DB_HOST"))
         self.use_batch = _truthy("FORECAST_STORE_USE_BATCH", "1")
         self.use_live_ads = _truthy("FORECAST_STORE_USE_LIVE_SQL", "1")
-        self.schema = get_tenant_schema()
+        self.schema = get_tenant_schema(tenant_id)
         self._db: WecommDatabaseConnector | None = None
         self._batch: pd.DataFrame | None = None
         self._classes: pd.DataFrame | None = None
         self._sku_uplift: dict[str, dict[str, float]] | None = None
         self._ads_cache: dict[str, float] | None = None
         self._stats_cache: dict[str, dict[str, float]] | None = None
+        self._daily_sales_df: pd.DataFrame | None = None
         self._mode = "stub"
 
     @property
@@ -228,6 +229,7 @@ class ForecastStore:
                 )
                 if not df.empty:
                     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
+                    self._daily_sales_df = df
                     lookback = float(SALES_LOOKBACK_DAYS)
                     for item, g in df.groupby(df["item_id"].astype(str)):
                         sold = g[g["quantity"] > 0]
@@ -264,6 +266,30 @@ class ForecastStore:
         if not item_ids:
             return stats
         return {str(i): stats.get(str(i), {"ads": 0.0, "demand_std": 0.0}) for i in item_ids}
+
+    def get_sales_history(self, item_ids: list[str], days: int = 90) -> dict[str, list[dict[str, Any]]]:
+        """Actual daily sales for the last `days` days per item — for UI trend charts.
+
+        Reuses the per-date frame already fetched by get_demand_stats(); call that
+        first (detect_order_service does) or this returns empty history.
+        """
+        out: dict[str, list[dict[str, Any]]] = {str(i): [] for i in item_ids}
+        df = self._daily_sales_df
+        if df is None or df.empty:
+            return out
+        wanted = {str(i) for i in item_ids}
+        recent = df.copy()
+        recent["item_id"] = recent["item_id"].astype(str)
+        recent = recent[recent["item_id"].isin(wanted)]
+        recent["_date"] = pd.to_datetime(recent["sale_date"], errors="coerce")
+        cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=days)
+        recent = recent[recent["_date"] >= cutoff].sort_values("_date")
+        for iid, g in recent.groupby("item_id"):
+            out[iid] = [
+                {"date": d.strftime("%Y-%m-%d"), "qty": float(q)}
+                for d, q in zip(g["_date"], g["quantity"])
+            ]
+        return out
 
     def _load_ads_map(self) -> dict[str, float]:
         if self._ads_cache is not None:
