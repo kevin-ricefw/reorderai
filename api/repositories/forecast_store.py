@@ -270,11 +270,15 @@ class ForecastStore:
     def get_sales_history(self, item_ids: list[str], days: int = 90) -> dict[str, list[dict[str, Any]]]:
         """Actual daily sales for the last `days` days per item — for UI trend charts.
 
-        Reuses the per-date frame already fetched by get_demand_stats(); call that
-        first (detect_order_service does) or this returns empty history.
+        Prefers the per-date frame get_demand_stats() cached from ai_pos_daily_sales;
+        falls back to a per-day order_items/orders rollup when that table is absent
+        (e.g. tenants without the analytics pipeline — order_items has no daily
+        granularity guarantee, so this is coarser but always available).
         """
         out: dict[str, list[dict[str, Any]]] = {str(i): [] for i in item_ids}
         df = self._daily_sales_df
+        if df is None or df.empty:
+            df = self._load_daily_sales_fallback(item_ids, days)
         if df is None or df.empty:
             return out
         wanted = {str(i) for i in item_ids}
@@ -290,6 +294,42 @@ class ForecastStore:
                 for d, q in zip(g["_date"], g["quantity"])
             ]
         return out
+
+    def _load_daily_sales_fallback(self, item_ids: list[str], days: int) -> pd.DataFrame | None:
+        """Per-day sales from order_items/orders — used when ai_pos_daily_sales is absent."""
+        if not self.configured or not item_ids:
+            return None
+        sch = q_ident(self.schema)
+        ids = [int(x) for x in item_ids]
+        id_csv = ",".join(str(i) for i in ids)
+        try:
+            df = self._conn().read_sql(
+                f"""
+                SELECT
+                  oi.product_id::text AS item_id,
+                  o.created_at::date AS sale_date,
+                  SUM(
+                    GREATEST(
+                      COALESCE(oi.quantity, 0) - COALESCE(oi.returned_quantity, 0),
+                      0
+                    )
+                  ) AS quantity
+                FROM {sch}.order_items oi
+                JOIN {sch}.orders o ON o.id = oi.order_id
+                WHERE o.deleted_at IS NULL
+                  AND oi.deleted_at IS NULL
+                  AND COALESCE(o.is_return, FALSE) = FALSE
+                  AND oi.product_id IN ({id_csv})
+                  AND o.created_at >= (NOW() - INTERVAL '{int(days)} days')
+                GROUP BY oi.product_id, o.created_at::date
+                """
+            )
+        except Exception:
+            return None
+        if df.empty:
+            return None
+        df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
+        return df
 
     def _load_ads_map(self) -> dict[str, float]:
         if self._ads_cache is not None:
