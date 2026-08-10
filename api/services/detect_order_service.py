@@ -525,6 +525,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
     response = DetectOrderResponse(
         ok=True,
         run_id=run_id,
+        tenant_id=req.tenant_id,
         vendors=vendors,
         vendor=vendor_info,
         lead_time_days=lead,
@@ -559,3 +560,27 @@ def get_order_run(run_id: str) -> dict[str, Any] | None:
     from api.services.order_run_store import load_order_run
 
     return load_order_run(run_id)
+
+
+def get_item_model_comparison(run_id: str, item_id: str) -> dict[str, Any] | None:
+    """Live per-model forecast comparison for one item from a saved run (on-demand, not for full-catalog use)."""
+    from api.services.order_run_store import load_order_run
+
+    run = load_order_run(run_id)
+    if not run:
+        return None
+    item = next((it for it in run.get("items", []) if str(it.get("item_id")) == str(item_id)), None)
+    if item is None:
+        return None
+
+    store = ForecastStore(tenant_id=run.get("tenant_id"))
+    alt_ids = [str(x) for x in (item.get("upc"), item.get("sku")) if x]
+    horizon = int(run.get("x_days") or item.get("horizon_days") or 7)
+    models = store.compare_models(item_id, alt_ids, horizon)
+    return {
+        "run_id": run_id,
+        "item_id": item_id,
+        "description": item.get("description"),
+        "horizon_days": horizon,
+        "models": models,
+    }
