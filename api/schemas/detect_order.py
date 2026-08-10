@@ -20,6 +20,14 @@ class DetectOrderRequest(BaseModel):
       - Risk factor 0–100 (scales safety-stock buffer)
     """
 
+    tenant_id: str | None = Field(
+        None,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description=(
+            "Tenant schema override (e.g. wecomm_<uuid>). "
+            "Omit to use the server's default TENANT_SCHEMA."
+        ),
+    )
     vendor_id: str | None = None
     vendor_name: str | None = None
     lead_time_days: int = Field(ge=0, description="Days from order to receipt")
@@ -64,6 +72,21 @@ class VendorPriceOffer(BaseModel):
     price: float
 
 
+class SalesPoint(BaseModel):
+    date: str
+    qty: float
+
+
+class SalesSeries(BaseModel):
+    history: list[SalesPoint] = Field(
+        default_factory=list, description="Actual daily sales, most recent lookback window"
+    )
+    forecast: list[SalesPoint] = Field(
+        default_factory=list,
+        description="Projected daily sales for the upcoming order window (ADS × uplift)",
+    )
+
+
 class DetectOrderItem(BaseModel):
     item_id: str
     upc: str | None = None
@@ -80,6 +103,10 @@ class DetectOrderItem(BaseModel):
     )
     cheapest_vendor: VendorPriceOffer | None = Field(
         None, description="Lowest-price offer among other vendors, only set when cheaper_elsewhere"
+    )
+    sales_series: SalesSeries = Field(
+        default_factory=SalesSeries,
+        description="Historical + predicted daily sales for this item, for UI charting",
     )
 
     demand_class: str | None = None

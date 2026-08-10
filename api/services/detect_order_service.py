@@ -9,6 +9,7 @@ Select vendor + L + C → for each SKU:
 from __future__ import annotations
 
 import os
+from datetime import date, timedelta
 from typing import Any
 
 from api.repositories.detect_order_repository import DetectOrderRepository
@@ -17,6 +18,7 @@ from api.schemas.detect_order import (
     DetectOrderItem,
     DetectOrderRequest,
     DetectOrderResponse,
+    SalesSeries,
     VendorInfo,
 )
 from api.services.order_run_store import new_run_id, save_order_run
@@ -44,6 +46,15 @@ def risk_to_service_level(risk_factor: int) -> float:
     r = max(0, min(100, int(risk_factor)))
     percentile = min(50.0 + r / 2.0, 99.9)
     return round(percentile / 100.0, 4)
+
+
+def _forecast_series(ads: float, uplift_m: float, x_days: int, as_of: date) -> list[dict[str, Any]]:
+    """Flat ADS×uplift projection for the upcoming order window — plotting reference only."""
+    qty = round(max(float(ads), 0.0) * max(float(uplift_m or 1.0), 1.0), 4)
+    return [
+        {"date": (as_of + timedelta(days=i + 1)).isoformat(), "qty": qty}
+        for i in range(max(int(x_days), 1))
+    ]
 
 
 def _vendors(repo: DetectOrderRepository) -> list[VendorInfo]:
@@ -150,8 +161,8 @@ def _template_justification(
 
 
 def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
-    repo = DetectOrderRepository()
-    store = ForecastStore()
+    repo = DetectOrderRepository(tenant_id=req.tenant_id)
+    store = ForecastStore(tenant_id=req.tenant_id)
 
     lead = int(req.lead_time_days)
     cover = int(req.time_to_cover_days)
@@ -230,6 +241,8 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
     other_vendor_prices = repo.fetch_all_vendor_prices(item_ids)
     # Warm ADS/std once for the whole catalog
     demand_stats = store.get_demand_stats(item_ids)
+    # get_sales_history reuses the per-date frame get_demand_stats just fetched
+    sales_history = store.get_sales_history(item_ids)
 
     as_of = reorder_as_of_date()
     as_of_s = as_of.isoformat()
@@ -410,6 +423,10 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             other_vendor_prices=offers,
             cheaper_elsewhere=bool(cheapest_offer),
             cheapest_vendor=cheapest_offer,
+            sales_series=SalesSeries(
+                history=sales_history.get(item_id, []),
+                forecast=_forecast_series(ads, uplift_m, x_days, as_of),
+            ),
             demand_class=str(demand_class) if demand_class else None,
             forecast_source=str(fc.get("source") or ""),
             available_stock=raw_on_hand,

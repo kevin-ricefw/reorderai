@@ -31,10 +31,10 @@ def _invoice_fallback_enabled() -> bool:
 
 
 class DetectOrderRepository:
-    def __init__(self) -> None:
+    def __init__(self, tenant_id: str | None = None) -> None:
         self.configured = bool(os.getenv("DB_HOST"))
         self.live = self.configured and _live_enabled()
-        self.schema = get_tenant_schema()
+        self.schema = get_tenant_schema(tenant_id)
         self._db: WecommDatabaseConnector | None = None
         self._vendor_name_cache: dict[str, str] = {}
         self._pack_by_upc: dict[str, int] | None = None
