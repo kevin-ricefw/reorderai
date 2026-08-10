@@ -128,6 +128,36 @@ class ForecastStore:
                     best, best_name = m, n
         return best, best_name
 
+    def daily_uplift_multipliers(
+        self,
+        item_id: str,
+        dates: list[date],
+        *,
+        alt_ids: list[str] | None = None,
+        allowed_types: list[str] | None = None,
+    ) -> list[float]:
+        """Per-day learned SKU uplift multiplier for each date — chart curve only."""
+        if not sku_uplift_enabled():
+            return [1.0] * len(dates)
+        if allowed_types is not None and len(allowed_types) == 0:
+            return [1.0] * len(dates)
+        table = self._sku_uplift if self._sku_uplift is not None else load_latest_sku_uplift()
+        self._sku_uplift = table
+        if not table:
+            return [1.0] * len(dates)
+        keys = _lookup_keys(item_id, alt_ids)
+        out: list[float] = []
+        for d in dates:
+            best = 1.0
+            for key in keys:
+                if key not in table:
+                    continue
+                m, _ = sku_multiplier_for_date(key, table, as_of=d, allowed_types=allowed_types)
+                if m > best:
+                    best = m
+            out.append(best)
+        return out
+
     def get_forecast(
         self,
         item_id: str,

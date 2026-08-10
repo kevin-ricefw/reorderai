@@ -48,12 +48,23 @@ def risk_to_service_level(risk_factor: int) -> float:
     return round(percentile / 100.0, 4)
 
 
-def _forecast_series(ads: float, uplift_m: float, x_days: int, as_of: date) -> list[dict[str, Any]]:
-    """Flat ADS×uplift projection for the upcoming order window — plotting reference only."""
-    qty = round(max(float(ads), 0.0) * max(float(uplift_m or 1.0), 1.0), 4)
+def _forecast_series(
+    store: ForecastStore,
+    item_id: str,
+    alt_ids: list[str],
+    ads: float,
+    x_days: int,
+    as_of: date,
+    uplift_types: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Daily ADS × per-day learned uplift projection for the upcoming order window."""
+    ads_f = max(float(ads), 0.0)
+    dates = [as_of + timedelta(days=i + 1) for i in range(max(int(x_days), 1))]
+    multipliers = store.daily_uplift_multipliers(
+        item_id, dates, alt_ids=alt_ids, allowed_types=uplift_types
+    )
     return [
-        {"date": (as_of + timedelta(days=i + 1)).isoformat(), "qty": qty}
-        for i in range(max(int(x_days), 1))
+        {"date": d.isoformat(), "qty": round(ads_f * m, 4)} for d, m in zip(dates, multipliers)
     ]
 
 
@@ -425,7 +436,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             cheapest_vendor=cheapest_offer,
             sales_series=SalesSeries(
                 history=sales_history.get(item_id, []),
-                forecast=_forecast_series(ads, uplift_m, x_days, as_of),
+                forecast=_forecast_series(store, item_id, alt_ids, ads, x_days, as_of, uplift_types),
             ),
             demand_class=str(demand_class) if demand_class else None,
             forecast_source=str(fc.get("source") or ""),
