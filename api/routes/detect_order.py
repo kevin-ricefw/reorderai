@@ -84,6 +84,17 @@ def get_detect_order_run(run_id: str) -> dict:
 
 
 @router.get(
+    "/runs/{run_id}/items/{item_id}/models",
+    summary="Compare live forecast models for one item (on-demand — not for full-catalog use)",
+)
+def get_item_models(run_id: str, item_id: str) -> dict:
+    data = detect_order_service.get_item_model_comparison(run_id, item_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not found in run {run_id}")
+    return data
+
+
+@router.get(
     "/runs/{run_id}/export.xlsx",
     summary="Download vendor order sheet as Excel",
 )

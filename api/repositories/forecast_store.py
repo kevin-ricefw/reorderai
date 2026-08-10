@@ -297,6 +297,90 @@ class ForecastStore:
             return stats
         return {str(i): stats.get(str(i), {"ads": 0.0, "demand_std": 0.0}) for i in item_ids}
 
+    def get_daily_series(self, item_id: str) -> pd.Series:
+        """Zero-padded daily quantity series for one item — for live model fitting (on-demand only).
+
+        Prefers the ai_pos_daily_sales cache from get_demand_stats(); falls back
+        to the order_items/orders rollup when that table is absent.
+        """
+        iid = str(item_id)
+        df = self._daily_sales_df
+        frame = df[df["item_id"].astype(str) == iid] if df is not None and not df.empty else pd.DataFrame()
+        if frame.empty:
+            fb = self._load_daily_sales_fallback([iid], int(SALES_LOOKBACK_DAYS))
+            frame = fb[fb["item_id"].astype(str) == iid] if fb is not None and not fb.empty else pd.DataFrame()
+        if frame.empty:
+            return pd.Series(dtype=float)
+        dates = pd.to_datetime(frame["sale_date"], errors="coerce")
+        by_day = (
+            frame.assign(_date=dates)
+            .dropna(subset=["_date"])
+            .groupby("_date")["quantity"]
+            .sum()
+            .sort_index()
+        )
+        if by_day.empty:
+            return pd.Series(dtype=float)
+        full_idx = pd.date_range(by_day.index.min(), by_day.index.max(), freq="D")
+        return by_day.reindex(full_idx, fill_value=0.0)
+
+    def compare_models(
+        self, item_id: str, alt_ids: list[str] | None, horizon_days: int
+    ) -> list[dict[str, Any]]:
+        """Run every forecasting method live for one item — on-demand comparison only.
+
+        Not for full-catalog use: each call fits Croston SBA + TSB + rule-based
+        and runs Monte Carlo simulation. LightGBM (the nightly batch's "smooth"
+        model) is pooled across all smooth SKUs and can't be cheaply/meaningfully
+        redone per item live, so "smooth_bootstrap" approximates it per-item instead.
+        """
+        from v2.forecasting.croston import fit_croston_sba, fit_rule_based, fit_tsb
+        from v2.forecasting.monte_carlo import simulate_horizon_demand, smooth_percentile_forecast
+
+        h = max(int(horizon_days), 1)
+        series = self.get_daily_series(item_id)
+        seed_base = abs(hash(str(item_id))) % (2**31)
+
+        results: list[dict[str, Any]] = []
+
+        sba = fit_croston_sba(series)
+        p50, p90 = simulate_horizon_demand(series, sba, horizon_days=h, seed=seed_base + 1)
+        results.append({"model": "croston_sba", "p50": p50, "p90": p90, "is_assigned": False, "kind": "live_refit"})
+
+        tsb = fit_tsb(series)
+        p50, p90 = simulate_horizon_demand(series, tsb, horizon_days=h, seed=seed_base + 2)
+        results.append({"model": "tsb", "p50": p50, "p90": p90, "is_assigned": False, "kind": "live_refit"})
+
+        rule = fit_rule_based(series)
+        p50, p90 = simulate_horizon_demand(series, rule, horizon_days=h, seed=seed_base + 3)
+        results.append({"model": "rule", "p50": p50, "p90": p90, "is_assigned": False, "kind": "live_refit"})
+
+        p50, p90 = smooth_percentile_forecast(series, horizon_days=h)
+        results.append(
+            {
+                "model": "smooth_bootstrap",
+                "p50": p50,
+                "p90": p90,
+                "is_assigned": False,
+                "kind": "live_refit",
+                "note": "Per-item bootstrap approximation — not the pooled LightGBM model used in the nightly batch.",
+            }
+        )
+
+        fc = self.get_forecast(item_id, horizon_days=h, alt_ids=alt_ids, uplift_types=[])
+        results.append(
+            {
+                "model": str(fc.get("model") or fc.get("source") or "unknown"),
+                "p50": float(fc.get("p50") or 0.0),
+                "p90": float(fc.get("p90") or 0.0),
+                "is_assigned": True,
+                "kind": "production",
+                "source": fc.get("source"),
+                "note": "The forecast actually used for this item's order math right now.",
+            }
+        )
+        return results
+
     def get_sales_history(self, item_ids: list[str], days: int = 90) -> dict[str, list[dict[str, Any]]]:
         """Actual daily sales for the last `days` days per item — for UI trend charts.
 

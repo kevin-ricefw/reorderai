@@ -218,6 +218,9 @@ class DetectOrderItem(BaseModel):
 class DetectOrderResponse(BaseModel):
     ok: bool = True
     run_id: str | None = None
+    tenant_id: str | None = Field(
+        None, description="Tenant schema used for this run (persisted so per-item model lookups can reconnect)"
+    )
     vendors: list[VendorInfo] = Field(default_factory=list)
     vendor: VendorInfo | None = None
     lead_time_days: int = 0
