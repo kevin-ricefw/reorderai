@@ -28,6 +28,11 @@ from v2.forecasting.festival_calendar import (
     festivals_in_horizon,
     reorder_as_of_date,
 )
+from v2.forecasting.global_lightgbm_predictor import (
+    forecast_batch as lgbm_forecast_batch,
+    model_ready as lgbm_model_ready,
+)
+from v2.products.same_item_brands import build_other_brands_map
 
 
 def _ads_lookback_days() -> float:
@@ -56,8 +61,12 @@ def _forecast_series(
     x_days: int,
     as_of: date,
     uplift_types: list[str] | None,
+    *,
+    lgbm_series: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Daily ADS × per-day learned uplift projection for the upcoming order window."""
+    """Prefer global LightGBM daily path; else ADS × per-day learned uplift."""
+    if lgbm_series:
+        return lgbm_series
     ads_f = max(float(ads), 0.0)
     dates = [as_of + timedelta(days=i + 1) for i in range(max(int(x_days), 1))]
     multipliers = store.daily_uplift_multipliers(
@@ -250,14 +259,24 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
     item_ids = [str(it["item_id"]) for it in raw_items]
     available_map = repo.fetch_available_stock(item_ids)
     other_vendor_prices = repo.fetch_all_vendor_prices(item_ids)
-    category_stock = repo.fetch_category_stock(item_ids)
+    other_brands_by_item = build_other_brands_map(repo.fetch_all_products_on_hand())
     # Warm ADS/std once for the whole catalog
     demand_stats = store.get_demand_stats(item_ids)
-    # get_sales_history reuses the per-date frame get_demand_stats just fetched
-    sales_history = store.get_sales_history(item_ids)
+    # Longer history for LightGBM lags (56d) + rolling windows
+    sales_history = store.get_sales_history(item_ids, days=120)
 
     as_of = reorder_as_of_date()
     as_of_s = as_of.isoformat()
+    lgbm_by_item: dict[str, list[dict[str, Any]]] = {}
+    if lgbm_model_ready():
+        product_attrs = repo.fetch_product_forecast_attrs(item_ids, as_of=as_of)
+        lgbm_by_item = lgbm_forecast_batch(
+            item_ids=item_ids,
+            sales_history=sales_history,
+            product_attrs=product_attrs,
+            as_of=as_of,
+            horizon_days=x_days,
+        )
     fest_rows = festivals_in_horizon(x_days, as_of=as_of)
     upcoming_festivals = format_festivals_for_display(fest_rows)
     weekend_row = next((r for r in fest_rows if r.get("name") == "weekend"), None)
@@ -432,18 +451,34 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             description=str(it.get("description") or ""),
             vendor_id=vendor_id,
             vendor_price=vendor_price,
-            category_id=(category_stock.get(item_id) or {}).get("category_id"),
-            category_name=(category_stock.get(item_id) or {}).get("category_name"),
-            category_qty=float((category_stock.get(item_id) or {}).get("category_qty") or 0.0),
+            other_brands_stock=str(
+                (other_brands_by_item.get(item_id) or {}).get("other_brands_stock") or ""
+            ),
+            same_item_brand_count=int(
+                (other_brands_by_item.get(item_id) or {}).get("same_item_brand_count") or 0
+            ),
             other_vendor_prices=offers,
             cheaper_elsewhere=bool(cheapest_offer),
             cheapest_vendor=cheapest_offer,
             sales_series=SalesSeries(
                 history=sales_history.get(item_id, []),
-                forecast=_forecast_series(store, item_id, alt_ids, ads, x_days, as_of, uplift_types),
+                forecast=_forecast_series(
+                    store,
+                    item_id,
+                    alt_ids,
+                    ads,
+                    x_days,
+                    as_of,
+                    uplift_types,
+                    lgbm_series=lgbm_by_item.get(item_id),
+                ),
             ),
             demand_class=str(demand_class) if demand_class else None,
-            forecast_source=str(fc.get("source") or ""),
+            forecast_source=(
+                "global_lightgbm"
+                if item_id in lgbm_by_item
+                else str(fc.get("source") or "")
+            ),
             available_stock=raw_on_hand,
             last_pallet_qty=float(last_pallet) if last_pallet is not None else None,
             expiration_days_remaining=exp_days_f,

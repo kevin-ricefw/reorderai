@@ -34,6 +34,8 @@ ORDER_TABLE_COLS: list[tuple[str, str]] = [
     ("description", "Product"),
     ("upc", "UPC"),
     ("available_stock", "On Hand"),
+    ("other_brands_stock", "Same item other brands"),
+    ("same_item_brand_count", "Brand count"),
     ("days_of_supply", "Days of Supply"),
     ("ads", "ADS / day"),
     ("ads_times_x", "ADS × X"),

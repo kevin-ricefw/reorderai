@@ -43,6 +43,8 @@ def _export_cols(x_days: int | None) -> list[tuple[str, Callable[[dict[str, Any]
         ("SKU", lambda it: it.get("sku")),
         ("Price", lambda it: it.get("vendor_price")),
         ("On Hand", lambda it: it.get("available_stock")),
+        ("Same item other brands", lambda it: it.get("other_brands_stock") or ""),
+        ("Brand count", lambda it: it.get("same_item_brand_count") or 0),
         ("Days of Supply", lambda it: it.get("days_of_supply")),
         ("ADS / day", lambda it: it.get("ads")),
         (x_label, lambda it: it.get("ads_times_x")),

@@ -237,7 +237,7 @@ def ensure_products_and_barcodes(
             slug = _slugify(name, upc)
             pack = int(r.pack) if pd.notna(r.pack) and float(r.pack) >= 1 else 1
             sell = float(r.sell_price) if pd.notna(r.sell_price) else 0.0
-            cost = float(r.cost) if pd.notna(r.cost) else None
+            cost = float(r.cost) if pd.notna(r.cost) else 0.0
             pid_row = conn.execute(
                 text(
                     f"""
@@ -408,22 +408,27 @@ def import_product_vendor(
         if hist:
             conn.execute(text(f"DELETE FROM {sch}.product_vendor_histories"))
         conn.execute(text(f"DELETE FROM {sch}.product_vendor"))
-        for r in uniq.itertuples(index=False):
-            conn.execute(
-                text(
-                    f"""
-                    INSERT INTO {sch}.product_vendor
-                      (product_id, vendor_id, price, lead_time_days, created_at, updated_at)
-                    VALUES
-                      (:pid, :vid, :price, NULL, NOW(), NOW())
-                    """
-                ),
-                {
-                    "pid": int(r.product_id),
-                    "vid": int(r.vendor_id),
-                    "price": float(r.price) if pd.notna(r.price) else None,
-                },
-            )
+        print("product_vendor cleared; bulk insert starting...")
+        rows = [
+            {
+                "pid": int(r.product_id),
+                "vid": int(r.vendor_id),
+                "price": float(r.price) if pd.notna(r.price) else None,
+            }
+            for r in uniq.itertuples(index=False)
+        ]
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO {sch}.product_vendor
+                  (product_id, vendor_id, price, lead_time_days, created_at, updated_at)
+                VALUES
+                  (:pid, :vid, :price, NULL, NOW(), NOW())
+                """
+            ),
+            rows,
+        )
+        print(f"product_vendor inserted={len(rows)}")
 
 
 def _resolve_warehouse_ids(
@@ -554,29 +559,31 @@ def import_inventory_locations(
         return
 
     with db.engine.begin() as conn:
-        for lid in zero_lids:
+        if zero_lids:
+            # zero picking stock for products not in this inventory dump
             conn.execute(
                 text(
                     f"""
                     UPDATE {sch}.product_locations
                     SET quantity = 0, updated_at = NOW()
-                    WHERE id = :lid
+                    WHERE id = ANY(:lids)
                     """
                 ),
-                {"lid": lid},
+                {"lids": zero_lids},
             )
-        for lid, qty in pending_updates:
+        if pending_updates:
             conn.execute(
                 text(
                     f"""
-                    UPDATE {sch}.product_locations
-                    SET quantity = :qty, updated_at = NOW()
-                    WHERE id = :lid
+                    UPDATE {sch}.product_locations AS pl
+                    SET quantity = v.qty, updated_at = NOW()
+                    FROM (VALUES (:lid, :qty)) AS v(lid, qty)
+                    WHERE pl.id = v.lid
                     """
                 ),
-                {"qty": qty, "lid": lid},
+                [{"lid": lid, "qty": qty} for lid, qty in pending_updates],
             )
-        for pid, qty in pending_inserts:
+        if pending_inserts:
             conn.execute(
                 text(
                     f"""
@@ -593,13 +600,16 @@ def import_inventory_locations(
                     )
                     """
                 ),
-                {
-                    "qty": qty,
-                    "pid": pid,
-                    "wh": wh_id,
-                    "wloc": wloc_id,
-                    "added": DEFAULT_ADDED_BY,
-                },
+                [
+                    {
+                        "qty": qty,
+                        "pid": pid,
+                        "wh": wh_id,
+                        "wloc": wloc_id,
+                        "added": DEFAULT_ADDED_BY,
+                    }
+                    for pid, qty in pending_inserts
+                ],
             )
     print(f"wrote inventory updates={updates} inserts={inserts} zeros={len(zero_lids)}")
 
@@ -631,7 +641,7 @@ def import_sales(
         f"sales upc->product matched={int(sales['product_id'].notna().sum())}/{len(sales)}"
     )
     if not execute:
-        print(f"[dry-run] would TRUNCATE+INSERT {len(sales)} → {schema}.{AI_SALES_TABLE}")
+        print(f"[dry-run] would TRUNCATE+INSERT {len(sales)} -> {schema}.{AI_SALES_TABLE}")
         return
 
     _ensure_ai_sales_table(db, sch)
@@ -652,7 +662,7 @@ def import_sales(
         upload["product_id"].notna(), None
     )
     n = db.write_dataframe(upload, AI_SALES_TABLE, schema=schema, if_exists="append")
-    print(f"wrote {n} rows → {schema}.{AI_SALES_TABLE}")
+    print(f"wrote {n} rows -> {schema}.{AI_SALES_TABLE}")
 
 
 def main() -> int:
@@ -675,7 +685,7 @@ def main() -> int:
     try:
         print("db_ok", int(db.read_sql("SELECT 1 AS ok").iloc[0]["ok"]))
     except Exception as exc:
-        print("ERROR: tunnel down — start Bastion + SSH :5433")
+        print("ERROR: tunnel down - start Bastion + SSH :5433")
         print(exc)
         return 2
 
@@ -759,7 +769,7 @@ def main() -> int:
             ).to_string(index=False)
         )
 
-    print("DONE — live POS orders untouched; gift_cards skipped.")
+    print("DONE - live POS orders untouched; gift_cards skipped.")
     return 0
 
 

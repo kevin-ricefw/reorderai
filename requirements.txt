@@ -23,6 +23,8 @@ numpy>=1.26.0
 pyarrow>=14.0.0
 # Phase 1 Smooth path uses bootstrap; LightGBM optional for later upgrade
 lightgbm>=4.0.0
+joblib>=1.3.0
+scikit-learn>=1.3.0
 
 # Tests
 pytest>=8.0.0
