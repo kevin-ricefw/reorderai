@@ -316,6 +316,60 @@ class DetectOrderRepository:
             if r.quantity is not None
         }
 
+    def fetch_category_stock(self, item_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Total stock across every product sharing each item's category."""
+        empty = {str(i): {"category_id": None, "category_name": None, "category_qty": 0.0} for i in item_ids}
+        if not self.live or not item_ids:
+            return empty
+
+        sch = q_ident(self.schema)
+        ids = [int(x) for x in item_ids]
+        id_csv = ",".join(str(i) for i in ids)
+        try:
+            cat_df = self._conn().read_sql(
+                f"""
+                SELECT p.id AS product_id, p.category_id, c.name AS category_name
+                FROM {sch}.products p
+                LEFT JOIN {sch}.categories c ON c.id = p.category_id
+                WHERE p.id IN ({id_csv})
+                """
+            )
+        except Exception:
+            return empty
+        if cat_df.empty:
+            return empty
+
+        cat_ids = sorted({int(x) for x in cat_df["category_id"].dropna().tolist()})
+        totals: dict[int, float] = {}
+        if cat_ids:
+            cat_csv = ",".join(str(c) for c in cat_ids)
+            try:
+                tot_df = self._conn().read_sql(
+                    f"""
+                    SELECT p.category_id, COALESCE(SUM(pl.quantity), 0) AS total_qty
+                    FROM {sch}.products p
+                    JOIN {sch}.product_locations pl ON pl.product_id = p.id
+                    WHERE p.category_id IN ({cat_csv})
+                      AND p.deleted_at IS NULL
+                      AND pl.deleted_at IS NULL
+                    GROUP BY p.category_id
+                    """
+                )
+                totals = {int(r.category_id): float(r.total_qty) for r in tot_df.itertuples(index=False)}
+            except Exception:
+                totals = {}
+
+        out = dict(empty)
+        for r in cat_df.itertuples(index=False):
+            pid = str(int(r.product_id))
+            cid = int(r.category_id) if r.category_id is not None and pd.notna(r.category_id) else None
+            out[pid] = {
+                "category_id": cid,
+                "category_name": str(r.category_name) if r.category_name is not None else None,
+                "category_qty": totals.get(cid, 0.0) if cid is not None else 0.0,
+            }
+        return out
+
     def fetch_all_vendor_prices(self, item_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
         """All vendor offers (vendor_id, vendor_name, price) per product_id — for the
         'cheaper by other vendor' flag. Keyed by item_id (str)."""

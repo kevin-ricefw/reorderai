@@ -94,6 +94,11 @@ class DetectOrderItem(BaseModel):
     description: str
     vendor_id: str
     vendor_price: float | None = Field(None, description="Vendor's price for this item (product_vendor.price)")
+    category_id: int | None = None
+    category_name: str | None = None
+    category_qty: float = Field(
+        0.0, description="Total stock across all products sharing this item's category"
+    )
     other_vendor_prices: list[VendorPriceOffer] = Field(
         default_factory=list,
         description="All other vendors selling this product (product_vendor), for price comparison",

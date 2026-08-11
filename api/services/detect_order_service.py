@@ -250,6 +250,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
     item_ids = [str(it["item_id"]) for it in raw_items]
     available_map = repo.fetch_available_stock(item_ids)
     other_vendor_prices = repo.fetch_all_vendor_prices(item_ids)
+    category_stock = repo.fetch_category_stock(item_ids)
     # Warm ADS/std once for the whole catalog
     demand_stats = store.get_demand_stats(item_ids)
     # get_sales_history reuses the per-date frame get_demand_stats just fetched
@@ -431,6 +432,9 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             description=str(it.get("description") or ""),
             vendor_id=vendor_id,
             vendor_price=vendor_price,
+            category_id=(category_stock.get(item_id) or {}).get("category_id"),
+            category_name=(category_stock.get(item_id) or {}).get("category_name"),
+            category_qty=float((category_stock.get(item_id) or {}).get("category_qty") or 0.0),
             other_vendor_prices=offers,
             cheaper_elsewhere=bool(cheapest_offer),
             cheapest_vendor=cheapest_offer,
