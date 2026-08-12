@@ -35,7 +35,7 @@ def test_enrich_from_name_defaults_missing_fields_to_na(monkeypatch):
 
 
 def test_enrich_missing_updates_each_row_and_reports_failures(monkeypatch):
-    rows = [{"id": 1, "name": "BANANA"}, {"id": 2, "name": "BAD ITEM"}]
+    rows = [{"id": 1, "slug": "BANANA"}, {"id": 2, "slug": "BAD ITEM"}]
     updates: list[tuple] = []
 
     class FakeRepo:

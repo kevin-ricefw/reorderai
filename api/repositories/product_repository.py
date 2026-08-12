@@ -1,7 +1,7 @@
 """
 DB reads/writes for products.product_name / brand / size enrichment.
 
-Tenant schema products table: id, name, sku, product_name, brand, size, ...
+Tenant schema products table: id, name, slug, sku, product_name, brand, size, ...
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class ProductRepository:
         sch = q_ident(self.schema)
         df = self._conn().read_sql(
             f"""
-            SELECT id, name, product_name, brand, size
+            SELECT id, slug, product_name, brand, size
             FROM {sch}.products
             WHERE id = :id
             """,
@@ -44,7 +44,7 @@ class ProductRepository:
             _MISSING.replace("col", c) for c in ("product_name", "brand", "size")
         )
         sql = f"""
-            SELECT id, name
+            SELECT id, slug
             FROM {sch}.products
             WHERE {missing}
             ORDER BY id
