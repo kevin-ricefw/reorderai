@@ -1,5 +1,5 @@
 """
-Fill products.product_name / brand / size from products.name via an LLM.
+Fill products.product_name / brand / size from products.slug via an LLM.
 
 Single id -> looked up + enriched, returned as JSON only (no DB write).
 No id -> every product missing one of these fields is enriched and written
@@ -60,7 +60,7 @@ def enrich_one(product_id: int, tenant_id: str | None = None) -> dict[str, Any]:
     row = repo.get_by_id(product_id)
     if row is None:
         raise ValueError(f"Product {product_id} not found")
-    fields = enrich_from_name(str(row["name"]))
+    fields = enrich_from_name(str(row["slug"]))
     return {"id": product_id, **fields}
 
 
@@ -71,7 +71,7 @@ def enrich_missing(tenant_id: str | None = None, limit: int | None = None) -> di
     failed: list[dict[str, Any]] = []
     for row in rows:
         try:
-            fields = enrich_from_name(str(row["name"]))
+            fields = enrich_from_name(str(row["slug"]))
             repo.update_fields(row["id"], **fields)
             updated.append({"id": row["id"], **fields})
         except Exception as exc:  # noqa: BLE001 - one bad item must not kill the batch
