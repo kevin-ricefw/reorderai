@@ -12,6 +12,8 @@ import os
 from datetime import date, timedelta
 from typing import Any
 
+import numpy as np
+
 from api.repositories.detect_order_repository import DetectOrderRepository
 from api.repositories.forecast_store import ForecastStore
 from api.schemas.detect_order import (
@@ -57,14 +59,28 @@ def _forecast_series(
     as_of: date,
     uplift_types: list[str] | None,
 ) -> list[dict[str, Any]]:
-    """Daily ADS × per-day learned uplift projection for the upcoming order window."""
+    """Daily demand for the upcoming order window — whole units bootstrapped from the
+    item's own sales history (so the curve fluctuates like real POS days), nudged by
+    the learned weekend/festival multiplier instead of a flat ADS line."""
     ads_f = max(float(ads), 0.0)
     dates = [as_of + timedelta(days=i + 1) for i in range(max(int(x_days), 1))]
     multipliers = store.daily_uplift_multipliers(
         item_id, dates, alt_ids=alt_ids, allowed_types=uplift_types
     )
+    if ads_f <= 0:
+        return [{"date": d.isoformat(), "qty": 0.0} for d in dates]
+
+    history = store.get_daily_series(item_id).to_numpy(dtype=float)
+    if history.size == 0:
+        history = np.array([ads_f])
+    # ponytail: seeded by item_id so the chart is stable across repeated requests,
+    # not a fresh random draw every refresh — upgrade to a proper simulation model
+    # (e.g. Croston/TSB per-day) if the business wants a "most likely path" instead.
+    rng = np.random.default_rng(abs(hash(str(item_id))) % (2**32))
+    draws = rng.choice(history, size=len(dates), replace=True)
     return [
-        {"date": d.isoformat(), "qty": round(ads_f * m, 4)} for d, m in zip(dates, multipliers)
+        {"date": d.isoformat(), "qty": float(round(q * m))}
+        for d, q, m in zip(dates, draws, multipliers)
     ]
 
 
