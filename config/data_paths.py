@@ -14,7 +14,7 @@ INVENTORY_DIR = DATA_ROOT / "inventory"
 
 
 def resolve_inventory_path() -> Path:
-    """Prefer newest CURRENT INVENTORY COUNT*.csv (case-insensitive)."""
+    """Prefer newest inventory count dump; else products.csv EOD export."""
     candidates = sorted(
         [
             p
@@ -26,6 +26,9 @@ def resolve_inventory_path() -> Path:
     )
     if candidates:
         return candidates[0]
+    products = INVENTORY_DIR / "products.csv"
+    if products.exists():
+        return products
     legacy = INVENTORY_DIR / "current inventory count.csv"
     return legacy
 

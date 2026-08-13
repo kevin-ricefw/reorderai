@@ -94,10 +94,17 @@ class DetectOrderItem(BaseModel):
     description: str
     vendor_id: str
     vendor_price: float | None = Field(None, description="Vendor's price for this item (product_vendor.price)")
-    category_id: int | None = None
-    category_name: str | None = None
-    category_qty: float = Field(
-        0.0, description="Total stock across all products sharing this item's category"
+    other_brands_stock: str = Field(
+        "",
+        description=(
+            "Same product under other brands with on-hand qty, e.g. "
+            "'Vadilal Drumstick - 7 | Ashoka Drumstick 310G - 1'. "
+            "Matched by core item name (not Wecomm category)."
+        ),
+    )
+    same_item_brand_count: int = Field(
+        0,
+        description="How many brand SKUs of this same item are in stock (incl. this line); 0 if alone",
     )
     other_vendor_prices: list[VendorPriceOffer] = Field(
         default_factory=list,

@@ -9,6 +9,7 @@ Live mode reads Wecomm tenant schema:
 from __future__ import annotations
 
 import os
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -316,60 +317,6 @@ class DetectOrderRepository:
             if r.quantity is not None
         }
 
-    def fetch_category_stock(self, item_ids: list[str]) -> dict[str, dict[str, Any]]:
-        """Total stock across every product sharing each item's category."""
-        empty = {str(i): {"category_id": None, "category_name": None, "category_qty": 0.0} for i in item_ids}
-        if not self.live or not item_ids:
-            return empty
-
-        sch = q_ident(self.schema)
-        ids = [int(x) for x in item_ids]
-        id_csv = ",".join(str(i) for i in ids)
-        try:
-            cat_df = self._conn().read_sql(
-                f"""
-                SELECT p.id AS product_id, p.category_id, c.name AS category_name
-                FROM {sch}.products p
-                LEFT JOIN {sch}.categories c ON c.id = p.category_id
-                WHERE p.id IN ({id_csv})
-                """
-            )
-        except Exception:
-            return empty
-        if cat_df.empty:
-            return empty
-
-        cat_ids = sorted({int(x) for x in cat_df["category_id"].dropna().tolist()})
-        totals: dict[int, float] = {}
-        if cat_ids:
-            cat_csv = ",".join(str(c) for c in cat_ids)
-            try:
-                tot_df = self._conn().read_sql(
-                    f"""
-                    SELECT p.category_id, COALESCE(SUM(pl.quantity), 0) AS total_qty
-                    FROM {sch}.products p
-                    JOIN {sch}.product_locations pl ON pl.product_id = p.id
-                    WHERE p.category_id IN ({cat_csv})
-                      AND p.deleted_at IS NULL
-                      AND pl.deleted_at IS NULL
-                    GROUP BY p.category_id
-                    """
-                )
-                totals = {int(r.category_id): float(r.total_qty) for r in tot_df.itertuples(index=False)}
-            except Exception:
-                totals = {}
-
-        out = dict(empty)
-        for r in cat_df.itertuples(index=False):
-            pid = str(int(r.product_id))
-            cid = int(r.category_id) if r.category_id is not None and pd.notna(r.category_id) else None
-            out[pid] = {
-                "category_id": cid,
-                "category_name": str(r.category_name) if r.category_name is not None else None,
-                "category_qty": totals.get(cid, 0.0) if cid is not None else 0.0,
-            }
-        return out
-
     def fetch_all_vendor_prices(self, item_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
         """All vendor offers (vendor_id, vendor_name, price) per product_id — for the
         'cheaper by other vendor' flag. Keyed by item_id (str)."""
@@ -489,6 +436,98 @@ class DetectOrderRepository:
             for r in df.itertuples(index=False)
             if r.max_qty is not None and float(r.max_qty) > 0
         }
+
+    def fetch_all_products_on_hand(self) -> list[dict[str, Any]]:
+        """All active products with barcode + total on-hand — for same-item brand matching."""
+        if not self.live:
+            return []
+        sch = q_ident(self.schema)
+        try:
+            df = self._conn().read_sql(
+                f"""
+                SELECT
+                  p.id::text AS item_id,
+                  p.name AS description,
+                  (
+                    SELECT pb.barcode
+                    FROM {sch}.product_barcodes pb
+                    WHERE pb.product_id = p.id
+                    ORDER BY pb.id
+                    LIMIT 1
+                  ) AS upc,
+                  COALESCE((
+                    SELECT SUM(pl.quantity)
+                    FROM {sch}.product_locations pl
+                    WHERE pl.product_id = p.id
+                      AND pl.deleted_at IS NULL
+                  ), 0) AS quantity
+                FROM {sch}.products p
+                WHERE p.deleted_at IS NULL
+                  AND COALESCE(p.is_active, TRUE) = TRUE
+                """
+            )
+        except Exception:
+            return []
+        if df.empty:
+            return []
+        return [
+            {
+                "item_id": str(r.item_id),
+                "description": str(r.description or ""),
+                "upc": str(r.upc or "") if r.upc is not None else "",
+                "quantity": float(r.quantity or 0.0),
+            }
+            for r in df.itertuples(index=False)
+        ]
+
+    def fetch_product_forecast_attrs(
+        self, item_ids: list[str], *, as_of: date | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Static product features for global LightGBM inference."""
+        if not self.live or not item_ids:
+            return {}
+        as_of_d = as_of or date.today()
+        sch = q_ident(self.schema)
+        ids = [int(x) for x in item_ids]
+        id_csv = ",".join(str(i) for i in ids)
+        try:
+            df = self._conn().read_sql(
+                f"""
+                SELECT
+                  p.id::text AS product_id,
+                  p.category_id::text AS category_id,
+                  COALESCE(p.price, 0) AS list_price,
+                  COALESCE(p.purchase_price, 0) AS purchase_price,
+                  COALESCE(p.scale, FALSE) AS is_scale,
+                  COALESCE(NULLIF(p.min_reorder_quantity, 0), 1) AS pack_size,
+                  p.created_at::date AS created_on
+                FROM {sch}.products p
+                WHERE p.id IN ({id_csv})
+                """
+            )
+        except Exception:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for r in df.itertuples(index=False):
+            created = getattr(r, "created_on", None)
+            age = 0
+            if created is not None and not pd.isna(created):
+                try:
+                    age = max((as_of_d - pd.Timestamp(created).date()).days, 0)
+                except Exception:
+                    age = 0
+            out[str(r.product_id)] = {
+                "product_id": str(r.product_id),
+                "category_id": str(r.category_id) if r.category_id is not None else "",
+                "list_price": float(r.list_price or 0.0),
+                "purchase_price": float(r.purchase_price or 0.0),
+                "is_scale": bool(r.is_scale),
+                "pack_size": float(r.pack_size or 1.0),
+                "any_discount_flag": False,
+                "product_age_days": float(age),
+                "price_change_percent": 0.0,
+            }
+        return out
 
     def _stub_items(self, vendor_id: str) -> list[dict[str, Any]]:
         catalog = {
