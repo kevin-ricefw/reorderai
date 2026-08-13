@@ -370,6 +370,58 @@ class DetectOrderRepository:
             }
         return out
 
+    def fetch_similar_product_qty(self, item_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Current on-hand qty for every product sharing each item's product_name."""
+        empty: dict[str, list[dict[str, Any]]] = {str(i): [] for i in item_ids}
+        if not self.live or not item_ids:
+            return empty
+
+        sch = q_ident(self.schema)
+        ids = [int(x) for x in item_ids]
+        id_csv = ",".join(str(i) for i in ids)
+        try:
+            name_df = self._conn().read_sql(
+                f"""
+                SELECT id AS product_id, product_name
+                FROM {sch}.products
+                WHERE id IN ({id_csv}) AND product_name IS NOT NULL
+                """
+            )
+        except Exception:
+            return empty
+        if name_df.empty:
+            return empty
+
+        names = sorted({str(n) for n in name_df["product_name"].dropna().tolist()})
+        try:
+            match_df = self._conn().read_sql(
+                f"""
+                SELECT p.id AS product_id, p.product_name,
+                       COALESCE(SUM(pl.quantity), 0) AS qty
+                FROM {sch}.products p
+                LEFT JOIN {sch}.product_locations pl
+                  ON pl.product_id = p.id AND pl.deleted_at IS NULL
+                WHERE p.product_name = ANY(:names)
+                  AND p.deleted_at IS NULL
+                GROUP BY p.id, p.product_name
+                """,
+                {"names": names},
+            )
+        except Exception:
+            return empty
+
+        by_name: dict[str, list[dict[str, Any]]] = {}
+        for r in match_df.itertuples(index=False):
+            by_name.setdefault(str(r.product_name), []).append(
+                {"product_id": str(int(r.product_id)), "product_name": str(r.product_name), "qty": float(r.qty)}
+            )
+
+        out = dict(empty)
+        for r in name_df.itertuples(index=False):
+            pid = str(int(r.product_id))
+            out[pid] = by_name.get(str(r.product_name), [])
+        return out
+
     def fetch_all_vendor_prices(self, item_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
         """All vendor offers (vendor_id, vendor_name, price) per product_id — for the
         'cheaper by other vendor' flag. Keyed by item_id (str)."""

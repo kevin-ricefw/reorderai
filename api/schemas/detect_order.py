@@ -72,6 +72,12 @@ class VendorPriceOffer(BaseModel):
     price: float
 
 
+class SimilarProductQty(BaseModel):
+    product_id: str
+    product_name: str
+    qty: float
+
+
 class SalesPoint(BaseModel):
     date: str
     qty: float
@@ -98,6 +104,10 @@ class DetectOrderItem(BaseModel):
     category_name: str | None = None
     category_qty: float = Field(
         0.0, description="Total stock across all products sharing this item's category"
+    )
+    similar_product_qty: list[SimilarProductQty] = Field(
+        default_factory=list,
+        description="Current qty of every product sharing this item's product_name",
     )
     other_vendor_prices: list[VendorPriceOffer] = Field(
         default_factory=list,
