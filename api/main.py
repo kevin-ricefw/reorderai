@@ -6,6 +6,7 @@ Reorder AI API — detect-order, forecast_store, chatbot.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -13,6 +14,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
