@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 
 load_dotenv(ROOT / ".env", override=True)
 
-from api.routes import chatbot, detect_order, products, system  # noqa: E402
+from api.routes import chatbot, detect_order, invoice_agent_queue, products, system  # noqa: E402
 
 app = FastAPI(
     title="Reorder AI",
@@ -45,6 +45,7 @@ app.include_router(system.router)
 app.include_router(detect_order.router)
 app.include_router(chatbot.router)
 app.include_router(products.router)
+app.include_router(invoice_agent_queue.router)
 
 
 @app.get("/")
@@ -64,6 +65,8 @@ async def root() -> dict:
             "chatbot_ask": "POST /api/chatbot/ask",
             "chatbot_tool": "POST /api/chatbot/tool",
             "products_enrich": "POST /api/products/enrich",
+            "parse_invoice": "POST /api/invoice-agent/parse-invoice",
+            "parse_invoice_status": "GET /api/invoice-agent/parse-invoice/status/{job_id}",
             "nightly_batch": "python scripts/run_nightly_forecast.py",
         },
     }
