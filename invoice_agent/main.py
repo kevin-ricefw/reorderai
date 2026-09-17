@@ -139,6 +139,7 @@ Rules:
 - total = the line's total dollar amount. If raw_total is given, convert it straight to a number. Otherwise compute quantity * price, rounded to 2 decimals.
 - Keep barcode as given (or null).
 - Never output a case/box quantity as quantity, or a case/box price as price.
+- quantity_confident: true only if the multiplier above is directly supported - raw_units_per_pack was given, or the name has an unambiguous "N x M <size>" pattern. Set to false whenever you had to guess: a vague unit-of-sale word with no stated count (e.g. "case", "bunch", "box", "lot", "pallet"), conflicting signals between raw_quantity/raw_units_per_pack/name, or reference_unit_of_measure disagreeing with your own read of the item.
 
 # Reference product catalog
 
@@ -157,8 +158,9 @@ NORMALIZE_ITEM_SCHEMA = {
         "price": {"type": "number", "description": "Per-unit price, normalized from case price if applicable"},
         "total": {"type": "number", "description": "Line total dollar amount for this item"},
         "barcode": {"type": ["string", "null"]},
+        "quantity_confident": {"type": "boolean", "description": "False if the unit-of-sale/multiplier was ambiguous (e.g. case, bunch, lot) and quantity may be wrong"},
     },
-    "required": ["name", "quantity", "price", "total", "barcode"],
+    "required": ["name", "quantity", "price", "total", "barcode", "quantity_confident"],
     "additionalProperties": False,
 }
 
@@ -168,7 +170,13 @@ def extract_json_output(response) -> dict:
     return json.loads(response.output_text)
 
 
-def extract_raw_invoice(client: OpenAI, pdf_bytes: bytes) -> dict:
+def response_tokens(response) -> int:
+    """Total tokens billed for one Responses API call (0 if usage is unavailable, e.g. in tests)."""
+    usage = getattr(response, "usage", None)
+    return getattr(usage, "total_tokens", 0) or 0
+
+
+def extract_raw_invoice(client: OpenAI, pdf_bytes: bytes) -> tuple[dict, int]:
     b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
     response = client.responses.create(
         model=MODEL,
@@ -192,10 +200,10 @@ def extract_raw_invoice(client: OpenAI, pdf_bytes: bytes) -> dict:
         }},
         reasoning={"effort": "low"},
     )
-    return extract_json_output(response)
+    return extract_json_output(response), response_tokens(response)
 
 
-def normalize_item(client: OpenAI, raw_item: dict) -> dict:
+def normalize_item(client: OpenAI, raw_item: dict) -> tuple[dict, int]:
     match = lookup_uom(raw_item["name"])
     enriched = {
         **raw_item,
@@ -213,28 +221,30 @@ def normalize_item(client: OpenAI, raw_item: dict) -> dict:
             "strict": True,
         }},
     )
-    return extract_json_output(response)
+    return extract_json_output(response), response_tokens(response)
 
 
-def _normalize_item_logged(client: OpenAI, item: dict, i: int, n: int) -> dict:
+def _normalize_item_logged(client: OpenAI, item: dict, i: int, n: int) -> tuple[dict, int]:
     t1 = time.monotonic()
-    normalized = normalize_item(client, item)
+    normalized, tokens = normalize_item(client, item)
     print(f"[parse] normalized item {i}/{n} in {time.monotonic()-t1:.1f}s: {item['name']!r}", flush=True)
-    return {**normalized, "product_id": None, "unit_of_measurement_id": None}
+    return {**normalized, "product_id": None, "unit_of_measurement_id": None}, tokens
 
 
 def parse_invoice_pdf(client: OpenAI, pdf_bytes: bytes) -> dict:
     t0 = time.monotonic()
     print(f"[parse] extracting raw invoice ({len(pdf_bytes)} bytes)...", flush=True)
-    raw = extract_raw_invoice(client, pdf_bytes)
+    raw, raw_tokens = extract_raw_invoice(client, pdf_bytes)
     n = len(raw["order_items"])
     print(f"[parse] raw extraction done in {time.monotonic()-t0:.1f}s - {n} item(s)", flush=True)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        normalized_items = list(pool.map(
+        normalized = list(pool.map(
             lambda args: _normalize_item_logged(client, *args),
             [(item, i, n) for i, item in enumerate(raw["order_items"], 1)],
         ))
+    normalized_items = [item for item, _tokens in normalized]
+    tokens_used = raw_tokens + sum(tokens for _item, tokens in normalized)
 
     return {
         "po_number": raw["po_number"],
@@ -245,6 +255,7 @@ def parse_invoice_pdf(client: OpenAI, pdf_bytes: bytes) -> dict:
         "shipping_handling_amount": raw["shipping_handling_amount"],
         "price_adjustment": raw["price_adjustment"],
         "invoice_total": raw["invoice_total"],
+        "tokens_used": tokens_used,
     }
 
 
